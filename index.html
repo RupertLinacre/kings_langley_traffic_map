@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#f0efe6" />
+    <meta name="description" content="A miniature Kings Langley, alive with moving traffic. Explore real village streets, follow a journey, and set your own pace." />
+    <title>Kings Langley — A living map</title>
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+    <link rel="stylesheet" href="./src/styles.css" />
+  </head>
+  <body class="loading">
+    <canvas id="road-canvas" tabindex="0" aria-label="Interactive living map of Kings Langley. Drag to move, scroll or pinch to zoom. Tap a vehicle, train or walker to follow a journey. Use Little village explorer for accessible discovery controls."></canvas>
+
+    <div class="mobile-brand" aria-hidden="true"><span class="brand-mark"></span><div>Kings Langley<span>A living map</span></div></div>
+
+    <button id="toggle-controls" class="icon-button panel-toggle" type="button" aria-label="Toggle map controls" aria-controls="controls-panel" aria-expanded="true" title="Toggle map controls">
+      <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 7h16M4 17h16M9 4v6M15 14v6" /></svg>
+    </button>
+
+    <aside id="controls-panel" class="controls-panel" aria-label="Map and simulation controls">
+      <header class="panel-header">
+        <div class="eyebrow"><span class="live-dot"></span>A living map<span class="edition">№ 01</span></div>
+        <h1>Kings<br /> Langley<span class="title-period">.</span></h1>
+        <p class="panel-intro">A little village. A life of its own.</p>
+        <div class="coordinates"><span>Hertfordshire, England</span><span>51.71° N · 0.45° W</span></div>
+      </header>
+
+      <div class="panel-content">
+        <fieldset id="simulation-controls" disabled>
+          <legend class="sr-only">Explore Kings Langley</legend>
+
+          <div class="playback-row">
+            <button id="pause-town" class="button button-primary" type="button">
+              <svg class="pause-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><rect x="5" y="4" width="3" height="12" rx="1" /><rect x="12" y="4" width="3" height="12" rx="1" /></svg>
+              <span id="pause-label">Pause town</span>
+            </button>
+            <button id="new-town" class="button button-secondary restart-button" type="button" title="Restart the simulation">
+              <svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M4 7a6.5 6.5 0 1 1-.2 5M4 3v4h4" /></svg>
+              Restart
+            </button>
+          </div>
+
+          <section class="control-section explore-section" aria-labelledby="explore-heading">
+            <div class="section-heading"><h2 id="explore-heading">Explore the village</h2><span class="section-number">01</span></div>
+            <label class="sr-only" for="place-focus">Go to a landmark</label>
+            <div class="select-wrap landmark-select"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M15.5 8c0 4-5.5 8-5.5 8S4.5 12 4.5 8a5.5 5.5 0 1 1 11 0Z" /><circle cx="10" cy="8" r="1.8" /></svg><select id="place-focus"><option value="">Go to a landmark…</option></select></div>
+            <div class="explore-actions">
+              <button id="plan-trip" class="text-button journey-button" type="button" aria-expanded="false" aria-controls="planner-panel"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><circle cx="4" cy="5" r="2" /><circle cx="16" cy="15" r="2" /><path d="M6 5h7a3 3 0 0 1 0 6H7a2 2 0 0 0 0 4h7" /></svg><span id="plan-trip-label">Plan a journey</span></button>
+              <button id="follow-bus" class="text-button" type="button"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><rect x="4" y="3" width="12" height="12" rx="3" /><path d="M4 9h12M7 3v6M13 3v6M6 15v2M14 15v2M7 12h.01M13 12h.01" /></svg>Follow a bus</button>
+            </div>
+            <details class="explorer-trail" open>
+              <summary><span aria-hidden="true">✦</span> Little village explorer</summary>
+              <p class="explorer-intro">Pick something to watch. Every journey has a story.</p>
+              <div class="explorer-grid">
+                <button type="button" data-discover="parking"><span aria-hidden="true">↔</span><span>Taking turns<small>Cars squeeze past parking</small></span></button>
+                <button type="button" data-discover="walking"><span aria-hidden="true">···</span><span>Mind the gap<small>Watch someone cross</small></span></button>
+                <button type="button" data-discover="train"><span aria-hidden="true">▤</span><span>Train spotting<small>Along the real railway</small></span></button>
+                <button type="button" data-discover="cycling"><span aria-hidden="true">↝</span><span>A little bike ride<small>Follow a village cyclist</small></span></button>
+                <button type="button" data-discover="turning"><span aria-hidden="true">↶</span><span>Three-point turn<small>Watch a little demonstration</small></span></button>
+              </div>
+              <p id="explorer-note" class="explorer-note">Try “Taking turns” to visit Coniston Road and Vicarage Lane.</p>
+            </details>
+            <div id="planner-panel" class="planner-panel" hidden>
+              <p class="small-copy">Choose two places to trace a route through the village.</p>
+              <label class="field-label" for="trip-from">From</label>
+              <div class="select-wrap"><select id="trip-from"><option value="">Choose a starting point…</option></select></div>
+              <label class="field-label" for="trip-to">To</label>
+              <div class="select-wrap"><select id="trip-to"><option value="">Choose a destination…</option></select></div>
+              <button id="swap-trip" class="text-button swap-trip" type="button" aria-label="Swap start and destination"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M3 6h13m-3-3 3 3-3 3M17 14H4m3-3-3 3 3 3" /></svg>Swap direction</button>
+              <p id="trip-result" class="trip-result" role="status">Select a start and destination.</p>
+              <button id="fit-trip" class="button button-secondary fit-trip" type="button" disabled><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M7 3H3v4M13 3h4v4M17 13v4h-4M7 17H3v-4" /></svg>Show whole journey</button>
+              <button id="reset-trip" class="text-button reset-trip" type="button">Clear journey</button>
+            </div>
+          </section>
+
+          <section class="control-section" aria-labelledby="rhythm-heading">
+            <div class="section-heading"><h2 id="rhythm-heading">Set the rhythm</h2><span class="section-number">02</span></div>
+            <div class="scenario-chooser" role="group" aria-labelledby="scenario-heading">
+              <h3 id="scenario-heading" class="sr-only">Choose the village activity</h3>
+              <button class="scenario-button" type="button" data-scenario="quiet" aria-pressed="false">Quiet morning</button>
+              <button class="scenario-button" type="button" data-scenario="everyday" aria-pressed="true">Village life</button>
+              <button class="scenario-button" type="button" data-scenario="rush" aria-pressed="false">Rush hour</button>
+            </div>
+            <div class="control-line"><label for="simulation-speed">Pace of life</label><div class="select-wrap speed-select"><select id="simulation-speed"><option value="0.5">½× speed</option><option value="1" selected>1× speed</option><option value="2">2× speed</option><option value="4">4× speed</option><option value="8">8× speed</option></select></div></div>
+            <div class="range-control"><div class="control-line"><label for="traffic-level">Road traffic</label><output id="traffic-value" for="traffic-level">100%</output></div><input id="traffic-level" type="range" min="0" max="600" step="10" value="100" /><div class="range-endpoints"><span>Quiet lanes</span><span>Rush hour</span></div></div>
+            <div class="range-control"><div class="control-line"><label for="cyclist-count">Cyclists</label><output id="cyclist-value" for="cyclist-count">24</output></div><input id="cyclist-count" type="range" min="0" max="150" step="1" value="24" /><div class="range-endpoints"><span>A gentle ride</span><span>Out in force</span></div></div>
+            <div class="range-control"><div class="control-line"><label for="people-count">People walking</label><output id="people-value" for="people-count">140</output></div><input id="people-count" type="range" min="0" max="400" step="10" value="140" /><div class="range-endpoints"><span>Peaceful pavements</span><span>A busy village</span></div></div>
+          </section>
+
+          <details class="settings-details">
+            <summary><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="m3 6 7-3 7 3-7 3-7-3Zm0 4 7 3 7-3M3 14l7 3 7-3" /></svg>Map appearance<span aria-hidden="true">+</span></summary>
+            <div class="settings-content">
+              <div class="range-control"><div class="control-line"><label for="road-size">Road width</label><output id="road-size-value" for="road-size">300%</output></div><input id="road-size" type="range" min="150" max="400" step="10" value="300" /></div>
+              <div class="range-control"><div class="control-line"><label for="town-zoom">Map zoom</label><output id="zoom-value" for="town-zoom">100%</output></div><input id="town-zoom" type="range" min="50" max="160" step="1" value="100" /></div>
+            </div>
+          </details>
+        </fieldset>
+
+        <details class="about-details">
+          <summary>About this little world<svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="8" cy="8" r="5.5" /><path d="M8 7v4M8 4.5v.5" /></svg></summary>
+          <div class="about-content"><p>Real streets, miniature life. Built from OpenStreetMap roads around Kings Langley, with an illustrative traffic simulation and a little imagined scenery.</p><p>Drag to explore. Scroll or pinch to zoom. Select a landmark to find your way, or tap a vehicle to follow its journey.</p><p>With the map focused, use the arrow keys to move, + and − to zoom, and Space to pause. Press Escape to close the journey planner.</p><p>Traffic is simulated and does not represent live road conditions.</p><button id="share-view" class="text-button share-view" type="button"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="m8 12 4-4M7 13l-1 1a3 3 0 0 1-4-4l4-4a3 3 0 0 1 4 0m0 8a3 3 0 0 0 4 0l4-4a3 3 0 0 0-4-4l-1 1" /></svg>Copy view link</button></div>
+        </details>
+      </div>
+      <footer class="panel-footer"><span class="status-dot"></span><span id="town-state">Waking up the village…</span></footer>
+    </aside>
+
+    <nav class="view-controls" aria-label="Map view">
+      <button id="fit-town" class="button overview-button" type="button" title="Fit the whole village in view"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M7 3H3v4M13 3h4v4M17 13v4h-4M7 17H3v-4" /><rect x="7" y="7" width="6" height="6" rx="1" /></svg><span>Overview</span></button>
+      <div class="zoom-buttons"><button id="zoom-in" class="icon-button" type="button" aria-label="Zoom in" title="Zoom in"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M10 4v12M4 10h12" /></svg></button><button id="zoom-out" class="icon-button" type="button" aria-label="Zoom out" title="Zoom out"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M4 10h12" /></svg></button><button id="home-town" class="icon-button" type="button" aria-label="Center on Kings Langley" title="Center on Kings Langley"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><circle cx="10" cy="10" r="5" /><path d="M10 2v4M10 14v4M2 10h4M14 10h4" /><circle cx="10" cy="10" r="1" fill="currentColor" stroke="none" /></svg></button></div>
+      <button id="save-postcard" class="icon-button postcard-button" type="button" aria-label="Save a postcard" title="Save a postcard"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><rect x="2.5" y="4" width="15" height="12" rx="1.5" /><path d="M11.5 6.5v7M14 7h1M14 10h1M5 13l2-3 2 3" /><circle cx="6" cy="7.5" r=".8" /></svg></button>
+      <div class="compass" aria-hidden="true"><span>N</span><svg viewBox="0 0 24 30"><path d="m12 3 5 20-5-4-5 4Z" fill="currentColor" /><path d="m12 3 5 20-5-4Z" fill="#fffdf6" opacity=".65" /></svg></div>
+    </nav>
+
+    <aside id="selection-panel" class="selection-panel" aria-labelledby="selection-title" hidden>
+      <div class="selection-heading"><span class="selection-eyebrow">A village journey</span><button id="close-selection" class="icon-button close-selection" type="button" aria-label="Close vehicle details" title="Close vehicle details"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="m6 6 8 8m0-8-8 8" /></svg></button></div>
+      <h2 id="selection-title">Village vehicle</h2>
+      <p id="selection-description" class="selection-description"></p>
+      <p id="selection-story" class="selection-story"></p>
+      <div class="selection-actions"><span id="selection-speed" class="selection-speed"></span><button id="follow-selected" class="button button-primary" type="button" aria-pressed="false"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><circle cx="10" cy="10" r="4" /><path d="M10 2v3M10 15v3M2 10h3M15 10h3" /></svg>Follow</button></div>
+    </aside>
+    <p id="map-hint" class="map-hint" title="Choose a vehicle or walker to follow a little journey."><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="m6 3 9 7-5 1-2 5-2-13Z" /></svg>Tap a vehicle or walker to follow along</p>
+    <p id="app-toast" class="app-toast" role="status" hidden></p>
+
+    <div class="status-dock" aria-label="Simulation statistics"><div class="metric"><span class="metric-label"><i class="car-swatch"></i>On the road</span><span id="car-count" class="metric-value">— cars</span></div><div class="metric"><span class="metric-label"><i class="bus-swatch"></i>Village buses</span><span id="bus-count" class="metric-value">— buses</span></div><div class="metric"><span class="metric-label">Traffic flow</span><span id="traffic-state" class="metric-value">Starting</span></div><div class="metric queue-metric"><span class="metric-label">At junctions</span><span id="queue-count" class="metric-value">— waiting</span></div></div>
+
+    <footer class="map-footer"><span class="map-caption">Real streets. Imagined journeys.</span><span id="map-scale" class="map-scale"></span><span class="attribution">Map data © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a> contributors</span></footer>
+    <p id="town-status" class="sr-only" role="status" aria-live="polite"></p>
+
+    <div id="loading-panel" class="loading-panel" role="status" aria-live="polite"><div class="loading-card"><div class="loading-illustration" aria-hidden="true"><svg viewBox="0 0 80 60" fill="none"><path d="M4 52h72M9 36l15-12 15 12v16H9V36Z" fill="#d1d7bc" /><path d="m5 36 19-16 19 16" stroke="#324536" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /><path d="M19 41h10v11H19z" fill="#60764d" /><path d="M47 30h20v22H47z" fill="#e4ceb0" /><path d="m43 30 14-15 14 15" stroke="#324536" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /><path d="M54 40h6v6h-6z" fill="#fffdf6" /><path d="M4 52h72" stroke="#324536" stroke-width="2" /></svg></div><p class="eyebrow">Kings Langley</p><h2>A village comes to life.</h2><p id="loading-message">Finding the roads. Planting the trees.</p><div class="loading-track" aria-hidden="true"><span></span></div><div id="map-load-error" hidden><p>The village could not be loaded. Please try again.</p><button id="retry-load" class="button button-primary" type="button">Try again</button></div></div></div>
+    <noscript><div class="no-script"><strong>A little village needs a little JavaScript.</strong><p>Enable JavaScript in your browser to explore the streets and bring Kings Langley to life.</p></div></noscript>
+    <script type="module" src="./src/app.js"></script>
+  </body>
+</html>

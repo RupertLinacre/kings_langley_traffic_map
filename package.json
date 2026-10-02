@@ -1,0 +1,16 @@
+{
+  "name": "kings-langley-living-town",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "An interactive miniature of Kings Langley, built on real OpenStreetMap streets.",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "node scripts/serve.mjs dev",
+    "build": "node scripts/build.mjs",
+    "preview": "node scripts/serve.mjs preview",
+    "test": "node --test tests/*.test.mjs"
+  }
+}
