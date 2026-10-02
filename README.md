@@ -64,7 +64,10 @@ Based on local observations, parked cars occupy the northwest side of Coniston
 Road and the north side of Vicarage Lane between Five Acres and Marwood Close.
 These residential rows sit half on the pavement, straddling the kerb.
 Drivers take turns using the remaining space. These are parking bottlenecks,
-not changes to the mapped legal direction of either road. Parking numbers and
+with both directions using the lane opposite the parked row. Busy queues pass
+in variable groups of three to ten; when a group clears, the opposite queue
+gets its turn. A short queue can finish before reaching the chosen group size.
+The mapped legal direction of each road stays the same. Parking numbers and
 bay spacing are illustrative; the parked rows remain when moving traffic is zero.
 
 Walkers use zebras and suitable unmarked crossing points. Away from zebras, they
@@ -93,23 +96,31 @@ part of the miniature scene; their placement is illustrative.
 
 ### GitHub Pages
 
-The repository includes `.github/workflows/pages.yml`. It runs the regression
-tests, builds `dist/`, and publishes that directory to GitHub Pages whenever
-`main` changes. Pull requests run the checks without publishing. No dependencies,
-API keys or repository secrets need to be configured.
+Publish from your local checkout with:
+
+```sh
+npm run deploy
+```
+
+This runs the tests, builds the static site, and pushes only the contents of
+`dist/` plus `.nojekyll` to `origin/gh-pages`. It uses a temporary checkout,
+preserves the branch's history, and leaves your source branch alone. Unchanged
+builds do not create another deployment commit. No npm dependencies or repository
+secrets are required. Git must be installed and authenticated with push access
+to `origin`; an existing GitHub CLI login is used for HTTPS GitHub remotes when
+available. The deployment commit uses your local Git author configuration.
 
 A repository admin or maintainer must enable Pages once:
 
 1. Open [Settings → Pages](https://github.com/RupertLinacre/kings_langley_traffic_map/settings/pages).
-2. Set **Build and deployment → Source** to **GitHub Actions**.
-3. Open **Actions → Test, build and deploy to GitHub Pages → Run workflow**,
-   select `main`, and run it.
+2. Set **Build and deployment → Source** to **Deploy from a branch**.
+3. Select **gh-pages** and **/ (root)**, then save.
 
-Until Pages is enabled, the workflow still tests, builds and uploads the site,
-and records these setup instructions instead of attempting deployment.
-After a successful deployment, the site will be at
+After Pages is enabled, the site will be at
 <https://rupertlinacre.github.io/kings_langley_traffic_map/>.
-Later pushes to `main` deploy automatically. Assets use relative paths so the
+Run `npm run deploy` again whenever you want to publish an update. The Actions
+workflow only tests and builds the source; it does not publish the site.
+Assets use relative paths so the
 repository subpath works without a custom domain or build configuration.
 
 ### Other static hosts

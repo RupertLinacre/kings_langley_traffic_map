@@ -35,6 +35,7 @@ export function parkingZones(data) {
       waiting: new Map(),
       direction: 0,
       batch: 0,
+      batchLimit: 0,
       lastSwitch: 0,
       clearing: false,
       narrow: baseline > 0,
@@ -42,7 +43,8 @@ export function parkingZones(data) {
       displays: edges,
       parkingSide: options.parkingSide ?? 1,
       parkingOffset: options.parkingOffset ?? 3.8,
-      passingOffset: options.passingOffset ?? 0,
+      // Both directions use the centre of the lane opposite the parked row.
+      passingOffset: options.passingOffset ?? -(options.parkingSide ?? 1) * (longest.edge.forward ? 1 : -1) * 1.55,
       clearance: options.clearance ?? 0,
       localObservation: Boolean(options.localObservation),
     });
@@ -80,7 +82,7 @@ export function parkingZones(data) {
     add(id, name, edges, capacity, {
       // Centre each car over the kerb: half on the road, half on the pavement.
       capacity, parkingSide, parkingOffset: 3.3,
-      passingOffset: -parkingSide * 1.25, clearance: 12,
+      clearance: 12,
       localObservation: true,
     });
   };
@@ -187,12 +189,19 @@ export class Parking {
         [...p.zone.claims.values()].every(r => r.direction === p.direction);
     });
   }
+  beginGroup(zone, direction) {
+    zone.direction = direction;
+    zone.batch = 0;
+    // Busy queues tend to follow one another; choose a new-sized group each turn.
+    zone.batchLimit = 3 + Math.floor(this.sim.random() * 8);
+    zone.lastSwitch = this.sim.time;
+  }
   claimSpawn(c) {
     for (const p of c.parkingPassages || []) {
       if (!p.zone.narrow || c.q <= p.entry || c.q - c.length >= p.exit + 2) continue;
+      if (p.zone.direction !== p.direction) this.beginGroup(p.zone, p.direction);
       p.zone.claims.set(c.id, { ...p, car: c });
-      p.zone.direction = p.direction;
-      p.zone.batch += c.length > 12 ? 2 : 1;
+      p.zone.batch++;
     }
   }
   count(zone) {
@@ -225,8 +234,8 @@ export class Parking {
         c.parked = null;
         c.roadStop.done = true;
         if (passage) {
+          if (!zone.direction) this.beginGroup(zone, passage.direction);
           zone.claims.set(c.id, { ...passage, car: c });
-          zone.direction = passage.direction;
           zone.batch++;
         }
         zone.parked.delete(c.id);
@@ -255,11 +264,16 @@ export class Parking {
             p.entry - c.q > Math.max(45, c.v * 3)
           )
             continue;
-          if (c.q > p.entry && !zone.claims.has(c.id))
+          if (c.q > p.entry && !zone.claims.has(c.id)) {
+            if (!zone.direction) this.beginGroup(zone, p.direction);
             zone.claims.set(c.id, { ...p, car: c });
+            zone.batch++;
+          }
           if (c.q <= p.entry && !zone.claims.has(c.id)) {
             const leader = s.leader(c, occupied, Math.max(250, p.entry - c.q));
-            if (leader.frontGap < p.entry - c.q) continue;
+            // A follower may join its leader's group before reaching the stop
+            // line. Ordinary following distances still control its movement.
+            if (leader.frontGap < p.entry - c.q && !zone.claims.has(leader.car?.id)) continue;
             if (!zone.waiting.has(c.id)) zone.waiting.set(c.id, s.time);
             requests.push({ ...p, car: c, since: zone.waiting.get(c.id) });
           }
@@ -283,8 +297,8 @@ export class Parking {
       const yieldNow =
         zone.direction &&
         opposed.length &&
-        (zone.batch >= 3 ||
-          s.time - Math.min(...opposed.map((r) => r.since)) > 15);
+        zone.batch >= zone.batchLimit;
+      const nextDirection = yieldNow ? -zone.direction : 0;
       if (
         !zone.claims.size &&
         (yieldNow || !requests.some((r) => r.direction === zone.direction))
@@ -293,20 +307,20 @@ export class Parking {
         zone.batch = 0;
       }
       if (!zone.direction && requests.length) {
-        // Earlier arrivals win; after a group has drained the longest waiter goes.
+        // Earlier arrivals win initially; a full group hands over to its queue.
         requests.sort(
           (a, b) =>
             a.since - b.since ||
             b.direction - a.direction ||
             a.car.id - b.car.id,
         );
-        zone.direction = requests[0].direction;
-        zone.lastSwitch = s.time;
+        const next = requests.find(r => r.direction === nextDirection) || requests[0];
+        this.beginGroup(zone, next.direction);
       }
       for (const r of requests.sort(
         (a, b) => a.entry - a.car.q - (b.entry - b.car.q),
       )) {
-        if (r.direction !== zone.direction || (yieldNow && zone.claims.size))
+        if (r.direction !== zone.direction)
           continue;
         if ([...zone.claims.values()].some((x) => x.direction !== r.direction))
           continue;
@@ -324,9 +338,9 @@ export class Parking {
           r.exit,
         );
         if (downstream.gap < r.car.length + 4) continue;
-        if (opposed.length && zone.batch >= 3) continue;
+        if (requests.some(x => x.direction !== zone.direction) && zone.batch >= zone.batchLimit) continue;
         zone.claims.set(r.car.id, r);
-        zone.batch += r.car.length > 12 ? 2 : 1;
+        zone.batch++;
       }
     }
   }

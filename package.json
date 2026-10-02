@@ -11,6 +11,8 @@
     "dev": "node scripts/serve.mjs dev",
     "build": "node scripts/build.mjs",
     "preview": "node scripts/serve.mjs preview",
+    "predeploy": "npm test && npm run build",
+    "deploy": "node scripts/deploy.mjs",
     "test": "node --test tests/*.test.mjs"
   }
 }

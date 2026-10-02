@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { Parking } from '../src/kings-langley/engine/parking.mjs';
 import { Simulation } from '../src/kings-langley/engine/simulation.mjs';
 import { position } from '../src/kings-langley/engine/graph.mjs';
+import { laneOffset } from '../src/kings-langley/engine/traffic-model.mjs';
 
 const data = JSON.parse(readFileSync(new URL('../data/kings-langley/network.json', import.meta.url)));
 
@@ -39,19 +40,65 @@ test('local parking follows the northwest side of Coniston and only the requeste
   }
 });
 
-function trafficFixture() {
-  const nodes = Object.fromEntries([0, 1, 2, 3].map((id, i) => [id, { id, p: [i === 0 ? 0 : i === 1 ? 100 : i === 2 ? 300 : 400, 0], tags: {} }]));
+function trafficFixture(seed = 73, approach = 100) {
+  const points = [0, approach, approach + 200, approach * 2 + 200];
+  const nodes = Object.fromEntries(points.map((x, id) => [id, { id, p: [x, 0], tags: {} }]));
   const edges = [];
   for (let i = 0; i < 3; i++) for (const forward of [true, false]) {
     const from = forward ? i : i + 1, to = forward ? i + 1 : i;
     edges.push({ id: edges.length, way: i, from, to, forward,
-      points: [nodes[from].p, nodes[to].p], length: i === 1 ? 200 : 100, speed: 13.4,
+      points: [nodes[from].p, nodes[to].p], length: i === 1 ? 200 : approach, speed: 13.4,
       tags: { highway: 'residential', name: i === 1 ? 'Coniston Road' : 'Approach' } });
   }
   const map = { nodes, edges, ways: [], restrictions: [] };
   const routes = [[0, 2, 4], [5, 3, 1]];
-  return { sim: new Simulation(map, 73, { routes: routes.map(path => ({ path, rate: 0 })) }), routes };
+  return { sim: new Simulation(map, seed, { routes: routes.map(path => ({ path, rate: 0 })) }), routes };
 }
+
+test('full queues follow through in varied groups of up to ten, with both directions clearing safely', () => {
+  const firstGroups = new Set();
+  for (const seed of [12, 42, 73, 99]) {
+    const { sim, routes } = trafficFixture(seed, 300);
+    const zone = sim.parking.zones.find(z => z.localObservation);
+    for (const path of routes) for (let i = 0; i < 12; i++) {
+      const car = sim.createVehicle(path, 'car', 308 - i * 17);
+      car.length = 9; sim.cars.push(car);
+    }
+    const entered = new Set(), groups = [];
+    for (let i = 0; i < 10000 && sim.cars.length; i++) {
+      sim.step(0.1, 0);
+      assert.ok(new Set([...zone.claims.values()].map(c => c.direction)).size <= 1);
+      for (const lane of sim.occupancy().values()) for (let j = 1; j < lane.length; j++)
+        assert.ok(lane[j - 1].end <= lane[j].start + 0.001, 'following bodies stay separated');
+      for (const car of sim.cars) {
+        const passage = car.parkingPassages[0];
+        if (entered.has(car.id) || car.q <= passage.entry) continue;
+        entered.add(car.id);
+        if (groups.at(-1)?.direction === passage.direction) groups.at(-1).count++;
+        else groups.push({ direction: passage.direction, count: 1 });
+      }
+    }
+    assert.equal(sim.completed, 24, 'both queues drain without starving or deadlocking');
+    assert.equal(entered.size, 24);
+    assert.ok(groups[0].count >= 3 && groups[0].count <= 10, 'the first queue gets a proper group');
+    assert.ok(groups.every(group => group.count <= 10), 'a waiting opposite queue gets its next turn');
+    assert.ok(groups.some(group => group.direction === -1) && groups.some(group => group.direction === 1));
+    firstGroups.add(groups[0].count);
+  }
+  assert.ok(firstGroups.size > 1, 'group sizes vary between seeded villages');
+});
+
+test('parking moves both directions onto the clear-side lane instead of the road centre', () => {
+  const parking = new Parking({ data });
+  for (const zone of parking.zones.filter(zone => zone.defaultBaseline > 0)) {
+    const edge = zone.display.edge, reverse = data.edges.find(e => e.way === edge.way && e.from === edge.to && e.to === edge.from);
+    if (!reverse) continue;
+    const d = (zone.display.start + zone.display.end) / 2;
+    const passing = parking.lateral({}, edge, d, laneOffset(edge, 0));
+    assert.equal(passing, -zone.parkingSide * laneOffset(edge, 0), 'parked-side drivers use the opposite carriageway');
+    assert.equal(parking.lateral({}, reverse, reverse.length - d, laneOffset(reverse, 0)), -passing, 'oncoming drivers stay in that same clear lane');
+  }
+});
 
 test('parked rows alternate traffic fairly and keep long vehicle rears clear of opposing claims', () => {
   const { sim, routes } = trafficFixture();
