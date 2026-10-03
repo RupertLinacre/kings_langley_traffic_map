@@ -534,8 +534,10 @@ function updateFireDashboard() {
     $('fire-road').textContent = engine.road?.tags.name || 'Village lane';
     const blocked = engine.blocked;
     const bumped = engine.bumpTime !== undefined && engine.time - engine.bumpTime < 1.5;
+    const wallBounce = engine.wallBounceTime !== undefined && engine.time - engine.wallBounceTime < 0.8;
     $('fire-driving-status').textContent = paused ? 'Paused — take a breather.' : blocked ? String(blocked) :
-        bumped ? 'A little nudge — making room!' : engine.siren ? 'Nee naw! Cars are making room.' : 'Siren off. The village carries on.';
+        wallBounce ? 'Bump! Keep steering — you can slide away.' : bumped ? 'A little nudge — making room!' :
+        engine.siren ? 'Nee naw! Cars are making room.' : 'Siren off. The village carries on.';
     $('fire-siren').querySelector('.fire-action-copy').textContent = engine.siren ? 'Nee naw on' : 'Nee naw off';
     $('fire-siren').setAttribute('aria-pressed', String(engine.siren));
     $('fire-sound').querySelector('.fire-action-copy').textContent = fireAudio.supported ? fireMuted ? 'Sound off' : 'Sound on' : 'Sound unavailable';

@@ -275,26 +275,107 @@ function movementPose(town, engine, x, y, angle, size) {
     body.road = next.road; body.layer = next.layer; body.width = next.width * styleFactor(next.road, size);
     return { next, body };
 }
-function edgeSlide(town, engine, speed, h, size, obstacles) {
-    let guide = null, distance = Infinity;
-    for (const s of nearby(geometry(town).grid, engine)) {
-        if (s.road !== engine.road) continue;
-        const d = projection(engine, s).distance;
-        if (d < distance) { distance = d; guide = s; }
+function wallNormal(body, wall) {
+    const c = Math.cos(wall.angle), s = Math.sin(wall.angle), dx = body.x - wall.x, dy = body.y - wall.y;
+    let best = null;
+    for (const [x, y, half] of [[c, s, wall.length / 2], [-s, c, wall.width / 2]]) {
+        const along = dx * x + dy * y;
+        const extent = Math.abs(x * Math.cos(body.angle) + y * Math.sin(body.angle)) * body.length / 2 +
+            Math.abs(-x * Math.sin(body.angle) + y * Math.cos(body.angle)) * body.width / 2;
+        const depth = half + extent + 0.03 - Math.abs(along);
+        if (!best || depth < best.depth) best = { x: x * (along < 0 ? -1 : 1), y: y * (along < 0 ? -1 : 1), depth };
     }
-    if (!guide || !guide.square) return null;
-    let tangent = Math.atan2(guide.dy, guide.dx);
-    if (Math.cos(tangent - engine.angle) < 0) tangent += Math.PI;
-    const alignment = Math.cos(tangent - engine.angle);
-    // Only help a truck already travelling along a verge. A nose aimed at
-    // grass, water, a building or a closed end must still stop normally.
-    if (alignment < 0.82) return null;
-    const slipSpeed = Math.sign(speed) * Math.min(5, Math.abs(speed)) * alignment;
-    const angle = engine.angle + clamp(angleDifference(tangent, engine.angle), -0.65 * h, 0.65 * h);
-    const candidate = movementPose(town, engine, engine.x + Math.cos(tangent) * slipSpeed * h,
-        engine.y + Math.sin(tangent) * slipSpeed * h, angle, size);
-    if (collision(candidate.body, obstacles) || !bodyOnSurface(town, candidate.body, size, engine.road)) return null;
-    return { ...candidate, speed: slipSpeed };
+    return best;
+}
+function boundaryNormal(town, engine, body) {
+    const geo = geometry(town);
+    // Canal/rail masks have their own normals. The nearby road tangent cannot
+    // turn their edge into a driveable shortcut or an invented bridge.
+    for (const mask of [geo.water, geo.rails]) for (const p of fullBodySamples(body)) {
+        for (const s of nearby(mask, p)) {
+            if (s.layer !== body.layer || projection(p, s).distance >= s.radius + 0.1) continue;
+            const at = projection(engine, s);
+            const x = engine.x - s.a.x - s.dx * at.t, y = engine.y - s.a.y - s.dy * at.t, length = Math.hypot(x, y);
+            if (length > 0.01) return { x: x / length, y: y / length };
+        }
+    }
+    let guide = null, distance = Infinity;
+    for (const s of nearby(geo.grid, body)) {
+        if (s.road !== engine.road) continue;
+        const at = projection(body, s);
+        if (at.distance < distance) { distance = at.distance; guide = { s, at }; }
+    }
+    if (!guide) return null;
+    const { s, at } = guide, x = s.a.x + s.dx * at.t - body.x, y = s.a.y + s.dy * at.t - body.y;
+    const length = Math.hypot(x, y);
+    if (length > 0.01) return { x: x / length, y: y / length };
+    const motion = Math.hypot(body.x - engine.x, body.y - engine.y);
+    return motion > 1e-9 ? { x: (engine.x - body.x) / motion, y: (engine.y - body.y) / motion } : null;
+}
+function safeContactMove(town, engine, x, y, angle, size, obstacles) {
+    const rotation = angleDifference(angle, engine.angle);
+    const destination = movementPose(town, engine, x, y, angle, size);
+    const width = Math.max(renderedBody(engine, size).width, destination.body.width);
+    const travel = Math.hypot(x - engine.x, y - engine.y) + Math.abs(rotation) * Math.hypot(engine.length, width) / 2;
+    const steps = Math.max(1, Math.ceil(travel / 0.12));
+    let candidate;
+    for (let i = 1; i <= steps; i++) {
+        const t = i / steps;
+        candidate = movementPose(town, engine, engine.x + (x - engine.x) * t, engine.y + (y - engine.y) * t,
+            engine.angle + rotation * t, size);
+        if (collision(candidate.body, obstacles) || !bodyOnSurface(town, candidate.body, size, engine.road)) return null;
+    }
+    return candidate;
+}
+function surfaceContact(town, engine, attempted, speed, steer, h, size, obstacles, wall) {
+    const normal = wall ? wallNormal(attempted.body, wall) : boundaryNormal(town, engine, attempted.body);
+    if (!normal) return null;
+    const vx = (attempted.next.x - engine.x) / h, vy = (attempted.next.y - engine.y) / h;
+    const inward = Math.min(0, vx * normal.x + vy * normal.y);
+    const tx = vx - inward * normal.x, ty = vy - inward * normal.y;
+    const previous = engine.wallContact;
+    const fresh = !previous || engine.time - previous.time > 0.35 || normal.x * previous.x + normal.y * previous.y < 0.75;
+    engine.wallContact = { ...normal, time: engine.time };
+    // Lose the impact's inward energy once; repeated side contact must not
+    // multiply away tangential momentum every 10 ms like a high-friction wall.
+    const retainedSpeed = fresh && inward < -0.5 ? speed * Math.min(1, Math.hypot(tx, ty) / Math.max(0.01, Math.abs(speed))) : speed;
+    let kick = 0;
+    if (fresh && inward < -0.5) {
+        kick = Math.min(2.2, -inward * 0.2);
+        engine.wallRecoilX = normal.x * kick; engine.wallRecoilY = normal.y * kick;
+        engine.wallBounceTime = engine.time;
+    }
+    // First approach the contact rather than throwing away the last safe
+    // portion of an 80 mph step. All recovery paths are then swept from here.
+    let lo = 0, hi = 1, approach = null;
+    for (let i = 0; i < 6; i++) {
+        const t = (lo + hi) / 2;
+        const candidate = safeContactMove(town, engine, engine.x + (attempted.next.x - engine.x) * t,
+            engine.y + (attempted.next.y - engine.y) * t,
+            engine.angle + angleDifference(attempted.next.angle, engine.angle) * t, size, obstacles);
+        if (candidate) { lo = t; approach = candidate; } else hi = t;
+    }
+    const base = approach?.next || engine, remaining = h * (1 - lo);
+    let tangent = Math.atan2(normal.x, -normal.y);
+    if (Math.cos(tangent - base.angle) < 0) tangent += Math.PI;
+    const aligned = base.angle + clamp(angleDifference(tangent, base.angle), -1.4 * remaining, 1.4 * remaining);
+    const requested = attempted.next.angle;
+    const pivot = base.angle + steer * 0.75 * remaining;
+    const facing = angle => Math.cos(angle) * normal.x + Math.sin(angle) * normal.y;
+    const angles = [];
+    if (facing(requested) > facing(base.angle) + 1e-7) angles.push(requested);
+    if (steer && facing(pivot) > facing(base.angle) + 1e-7) angles.push(pivot);
+    if (Math.hypot(tx, ty) > 0.15) angles.push(aligned);
+    angles.push(base.angle);
+    for (const bias of [0.15, 0]) for (const angle of angles) {
+        const candidate = safeContactMove(town, base,
+            base.x + (tx + normal.x * (kick + bias)) * remaining,
+            base.y + (ty + normal.y * (kick + bias)) * remaining, angle, size, obstacles);
+        if (candidate) return { ...candidate, speed: Math.hypot(tx, ty) > 0.05 ? retainedSpeed : 0 };
+    }
+    // A crowded corner may have no safe sideways/recoil path. Keep the safe
+    // approach and allow the next substep to steer or reverse out of contact.
+    return approach ? { ...approach, speed: 0 } : null;
 }
 
 /** Start on the real Common Lane fire station's paved apron, facing its road
@@ -335,6 +416,9 @@ export function updateFireEngine(town, dt, input = {}, widthFactor = town.fireEn
     const steps = Math.max(1, Math.ceil(Math.min(dt, 1) / DRIVE_STEP_SECONDS)), h = Math.min(dt, 1) / steps;
     for (let i = 0; i < steps; i++) {
         engine.time += h;
+        const recoilDecay = Math.exp(-12 * h);
+        engine.wallRecoilX = (engine.wallRecoilX || 0) * recoilDecay;
+        engine.wallRecoilY = (engine.wallRecoilY || 0) * recoilDecay;
         // Generous steering lock helps parking-speed village corners; limiting
         // lock as speed rises prevents a held arrow making a sudden tight spin.
         const steeringTarget = steer * (0.78 / (1 + (Math.abs(engine.speed) / 7) ** 2));
@@ -346,8 +430,8 @@ export function updateFireEngine(town, dt, input = {}, widthFactor = town.fireEn
         if (Math.abs(speed) < 1e-9) speed = 0;
         const turn = speed / 5.7 * Math.tan(engine.steering) * h;
         const angle = engine.angle + turn, middle = engine.angle + turn / 2;
-        let { next, body } = movementPose(town, engine, engine.x + Math.cos(middle) * speed * h,
-            engine.y + Math.sin(middle) * speed * h, angle, widthFactor);
+        let { next, body } = movementPose(town, engine, engine.x + (Math.cos(middle) * speed + engine.wallRecoilX) * h,
+            engine.y + (Math.sin(middle) * speed + engine.wallRecoilY) * h, angle, widthFactor);
         let obstruction = collision(body, obstacles);
         let paved = bodyOnSurface(town, body, widthFactor, engine.road);
         if (paved && obstruction?.kind === 'traffic' && obstruction.car && throttle &&
@@ -362,8 +446,9 @@ export function updateFireEngine(town, dt, input = {}, widthFactor = town.fireEn
                 obstruction = collision(body, obstacles);
             }
         }
-        if ((!paved || obstruction?.kind === 'building') && (!obstruction || obstruction.kind === 'building') && Math.abs(speed) > 0.05) {
-            const slide = edgeSlide(town, engine, speed, h, widthFactor, obstacles);
+        const staticContact = (!paved || obstruction?.kind === 'building') && (!obstruction || obstruction.kind === 'building');
+        if (staticContact) {
+            const slide = surfaceContact(town, engine, { next, body }, speed, steer, h, widthFactor, obstacles, obstruction);
             if (slide) {
                 next = slide.next; body = slide.body; speed = slide.speed; paved = true; obstruction = null;
                 engine.edgeAssist = true;
@@ -373,10 +458,13 @@ export function updateFireEngine(town, dt, input = {}, widthFactor = town.fireEn
             engine.speed = 0;
             engine.blocked = obstruction ? obstruction.kind === 'pedestrian' ? 'Waiting for people to cross' :
                 obstruction.kind?.includes('manoeuvre') || obstruction.kind?.includes('turning') || obstruction.kind?.includes('overtaking') ? 'Waiting for a car to finish manoeuvring' : 'Waiting for a clear gap' : 'Stay on the road or pavement';
+            if (staticContact) continue;
+            engine.wallRecoilX = 0; engine.wallRecoilY = 0;
             engine.time += (steps - i - 1) * h;
             break;
         }
         engine.distance += Math.hypot(next.x - engine.x, next.y - engine.y);
+        engine.blocked = '';
         engine.x = next.x; engine.y = next.y; engine.angle = next.angle;
         engine.road = next.road; engine.layer = next.layer; engine.speed = speed;
         engine.pose = body;
