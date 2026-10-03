@@ -155,7 +155,7 @@ function syncAnimation() {
     frame = null; lastTime = 0; accumulator = 0;
     fireControls.clear();
     fireAudio.update({ active: Boolean(town?.fireEngine?.active && !paused && !document.hidden),
-        enabled: Boolean(town?.fireEngine?.siren && !fireMuted), time: town?.simulation.time || 0 });
+        enabled: Boolean(town?.fireEngine?.siren && !fireMuted), time: performance.now() / 1000 });
     if (town) renderer.captureMotion(town);
     updateLabels(); requestDraw();
 }
@@ -213,7 +213,7 @@ function startTraffic(seed = newSeed(), initialMinutes) {
     acceptedRoadWidth = town.walking.widthFactor;
     setRealTraffic(town, Number(traffic.value) / 100);
     const stationArea = stationArtGeometry(town)?.bounds;
-    scenery = createScenery(map, seed, { reservedAreas: stationArea ? [stationArea] : [] });
+    scenery = createScenery(map, seed, { reservedAreas: [stationArea, town.fireStation?.bounds].filter(Boolean) });
     town.scenery = scenery;
     for (let i = 0; i < 30; i++) updateRealTown(town, 0.1);
     lastMetrics = -1; cacheDirty = true;
@@ -530,29 +530,34 @@ function updateFireDashboard() {
     $('fire-speed').textContent = `${engine.speed < -0.1 ? 'R · ' : ''}${Math.round(Math.abs(engine.speed) * 2.23694)} mph`;
     $('fire-road').textContent = engine.road?.tags.name || 'Village lane';
     const blocked = engine.blocked;
+    const bumped = engine.bumpTime !== undefined && engine.time - engine.bumpTime < 1.5;
     $('fire-driving-status').textContent = paused ? 'Paused — take a breather.' : blocked ? String(blocked) :
-        engine.siren ? 'Nee naw! Cars are making room.' : 'Siren off. The village carries on.';
-    $('fire-siren').textContent = engine.siren ? 'Nee naw on' : 'Nee naw off';
+        bumped ? 'A little nudge — making room!' : engine.siren ? 'Nee naw! Cars are making room.' : 'Siren off. The village carries on.';
+    $('fire-siren').querySelector('.fire-action-copy').textContent = engine.siren ? 'Nee naw on' : 'Nee naw off';
     $('fire-siren').setAttribute('aria-pressed', String(engine.siren));
-    $('fire-sound').textContent = fireAudio.supported ? fireMuted ? 'Sound off' : 'Sound on' : 'Sound unavailable';
+    $('fire-sound').querySelector('.fire-action-copy').textContent = fireAudio.supported ? fireMuted ? 'Sound off' : 'Sound on' : 'Sound unavailable';
     $('fire-sound').setAttribute('aria-pressed', String(!fireMuted && fireAudio.supported));
     $('fire-sound').disabled = !fireAudio.supported;
     $('fire-engine-hud').classList.toggle('siren-off', !engine.siren);
+    $('fire-engine-hud').classList.toggle('has-blockage', Boolean(blocked || paused || bumped));
+    $('fire-pace').value = speed.value;
     fireAudio.update({ active: !paused && !document.hidden, enabled: engine.siren && !fireMuted,
-        time: town.simulation.time });
+        time: performance.now() / 1000 });
 }
 
 function enterFireEngine() {
     if (!town || town.fireEngine?.active) return;
-    const previous = { paused, speed: speed.value, collapsed };
+    const previous = { paused, collapsed };
     if (planning) setPlanning(false);
     clearSelection();
     startFireEngine(town, { widthFactor: Number(width.value) / 100 });
-    if (!town.fireEngine?.active) { notify('The village streets are busy. Try again in a moment.'); return; }
+    if (!town.fireEngine?.active) { notify(town.fireEngine?.blocked || 'The fire station forecourt is busy. Try again in a moment.'); return; }
     fireMode = previous; fireFollowing = true;
-    paused = false; speed.value = '1'; speed.disabled = width.disabled = true;
+    paused = false; width.disabled = true;
     $('drive-fire-engine').setAttribute('aria-pressed', 'true');
     $('fire-engine-hud').hidden = false;
+    $('fire-engine-hud').classList.remove('controls-expanded');
+    $('fire-help').setAttribute('aria-expanded', 'false');
     document.body.classList.add('driving-fire-engine');
     canvas.setAttribute('aria-label', 'Drive your fire engine around Kings Langley. Arrow keys or WASD to drive and steer, Space to brake, N for the siren, M to mute, Escape to finish. Stay on roads and pavements.');
     setCollapsed(true);
@@ -569,8 +574,8 @@ function leaveFireEngine() {
     $('drive-fire-engine').setAttribute('aria-pressed', 'false');
     document.body.classList.remove('driving-fire-engine');
     canvas.setAttribute('aria-label', mapCanvasLabel);
-    speed.disabled = width.disabled = false;
-    if (fireMode) { paused = fireMode.paused; speed.value = fireMode.speed; setCollapsed(fireMode.collapsed); }
+    width.disabled = false;
+    if (fireMode) { paused = fireMode.paused; setCollapsed(fireMode.collapsed); }
     fireMode = null;
     syncAnimation();
 }
@@ -616,6 +621,11 @@ $('drive-fire-engine').addEventListener('click', enterFireEngine);
 $('fire-leave').addEventListener('click', () => fireAction('leave'));
 $('fire-siren').addEventListener('click', () => fireAction('siren'));
 $('fire-sound').addEventListener('click', () => fireAction('sound'));
+$('fire-help').addEventListener('click', () => {
+    const expanded = $('fire-engine-hud').classList.toggle('controls-expanded');
+    $('fire-help').setAttribute('aria-expanded', String(expanded)); resizeMap();
+});
+$('fire-pace').addEventListener('change', () => { speed.value = $('fire-pace').value; syncAnimation(); });
 $('fire-reset').addEventListener('click', () => {
     if (!town?.fireEngine?.active) return;
     const siren = town.fireEngine.siren;

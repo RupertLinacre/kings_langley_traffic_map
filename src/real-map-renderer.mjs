@@ -10,6 +10,7 @@ import { drawStationArea, drawStationPassengers } from './station-art.mjs';
 import { drawJourneyGroups } from './journey-art.mjs';
 import { drawFireEngine } from './fire-engine-art.mjs';
 import { fireEnginePose } from './fire-engine.mjs';
+import { drawFireStation } from './fire-station.mjs';
 
 export class RealMapRenderer {
     constructor(canvas) {
@@ -226,6 +227,7 @@ export class RealMapRenderer {
             drawPedestrianCrossings(g, town, roadSize, layer);
             drawBusStops(g, town, roadSize, layer, (p, margin) => this.visible(p, margin), this.view.scale);
             drawStationArea(g, town, roadSize, layer, (p, margin) => this.visible(p, margin), this.view.scale);
+            drawFireStation(g, town.fireStation, { zoom: this.view.scale, layer, visible: (p, margin) => this.visible(p, margin) });
             if (layer > 0) {
                 const overlay = oldBridges.get(layer) || document.createElement('canvas');
                 if (overlay.width !== this.scenery.width) overlay.width = this.scenery.width;
@@ -285,10 +287,10 @@ export class RealMapRenderer {
             g.lineWidth = 3 / this.view.scale; g.strokeStyle = road.colour; g.strokeText(name, 0, 0);
             g.fillStyle = '#eeeedd'; g.fillText(name, 0, 0); g.restore();
         }
-        for (const landmark of this.map.landmarks.filter(l => ['station', 'common', 'love'].includes(l.id))) {
+        for (const landmark of this.map.landmarks.filter(l => ['station', 'fire-station', 'common', 'love'].includes(l.id))) {
             const p = { x: landmark.p[0], y: landmark.p[1] };
             if (!this.visible(p, -40)) continue;
-            const name = landmark.id === 'station' ? 'KINGS LANGLEY STATION' : landmark.id === 'common' ? 'PRIMARY SCHOOL' : 'KINGS LANGLEY SCHOOL';
+            const name = landmark.id === 'station' ? 'KINGS LANGLEY STATION' : landmark.id === 'fire-station' ? 'FIRE STATION' : landmark.id === 'common' ? 'PRIMARY SCHOOL' : 'KINGS LANGLEY SCHOOL';
             g.font = `600 ${9 / this.view.scale}px system-ui`; g.textAlign = 'center';
             g.lineWidth = 4 / this.view.scale; g.strokeStyle = '#e4e9cf'; g.strokeText(name, p.x, p.y - 14 / this.view.scale);
             g.fillStyle = '#567461'; g.fillText(name, p.x, p.y - 14 / this.view.scale);
@@ -364,7 +366,7 @@ export class RealMapRenderer {
                 }
                 drawVehicle(g, { bus, type: car.type, length: car.length * 2, width: car.width * (p.station ? 1 : this.factor(p.road)) * 2,
                     colour: bus ? car.busStyle.colour : car.paint, route: car.busStyle, braking: car.v < 1, dwell: car.roadStop?.remaining || 0,
-                    indicator, reversing: car.turnaround?.reversing || car.parkingActivity?.reversing },
+                    indicator, reversing: car.turnaround?.reversing || car.parkingActivity?.reversing || car.emergencyYield?.reversing },
                     { x: p.x * 2, y: p.y * 2, angle: p.angle }, time);
             }
             g.restore();

@@ -5,12 +5,14 @@ import { groupPose } from './purposeful-journeys.mjs';
 import { stationPassengerPose } from './station-visits.mjs';
 import { pathPoint } from './street-geometry.mjs';
 import { orientedBodiesOverlap } from './body-geometry.mjs';
+import { fireStationGeometry, fireStationContainsPoint } from './fire-station.mjs';
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const angleDifference = (a, b) => Math.atan2(Math.sin(a - b), Math.cos(a - b));
 const styleFactor = (road, size) => Math.min(size * (road.size || 1), road.widthCap || Infinity);
 const geometries = new WeakMap();
 const buildingGeometry = new WeakMap();
+const stations = new WeakMap();
 const CELL = 48;
 const PAVEMENT = 3;
 
@@ -116,11 +118,21 @@ function sceneryBodies(town) {
     const scenery = town.scenery || town.fireEngineScenery;
     if (!scenery) return [];
     if (!buildingGeometry.has(scenery)) buildingGeometry.set(scenery, (scenery.buildings || []).map(b =>
-        ({ x: b.x, y: b.y, angle: b.angle || 0, length: b.w, width: b.h, layer: 0, kind: 'building' })));
+        // The artwork includes roof/eave overhang. Use the wall footprint so a
+        // tiny decorative corner cannot snag the appliance's side mirror.
+        ({ x: b.x, y: b.y, angle: b.angle || 0, length: Math.max(1, b.w - 0.5), width: Math.max(1, b.h - 0.5), layer: 0, kind: 'building' })));
     return buildingGeometry.get(scenery);
 }
+function stationFor(town) {
+    if (town.fireStation) return town.fireStation;
+    if (!stations.has(town.map)) stations.set(town.map, fireStationGeometry(town.map));
+    return stations.get(town.map);
+}
+function wallBodies(town) {
+    return [...sceneryBodies(town), ...(stationFor(town)?.buildings || []).map(b => ({ ...b, kind: 'building' }))];
+}
 function bodyOnSurface(town, body, size, currentRoad = body.road) {
-    const geo = geometry(town), joins = portals(town, currentRoad);
+    const geo = geometry(town), joins = portals(town, currentRoad), station = stationFor(town);
     const limit = body.length + body.width + 2;
     for (const p of fullBodySamples(body)) {
         const surfaces = nearby(geo.grid, p).filter(s => {
@@ -131,7 +143,7 @@ function bodyOnSurface(town, body, size, currentRoad = body.road) {
             if (s.road.layer > 0 && (s.first && projected.raw < 0 || s.last && projected.raw > 1)) return false;
             return projected.distance <= halfSurface(s.road, size, p, s);
         });
-        if (!surfaces.length) return false;
+        if (!surfaces.length && !fireStationContainsPoint(station, { ...p, layer: body.layer })) return false;
         // Only a surveyed road bridge/tunnel may carry a body over water or
         // rails; a nearby enlarged street cannot manufacture such a crossing.
         for (const mask of [geo.water, geo.rails]) for (const s of nearby(mask, p)) {
@@ -140,14 +152,23 @@ function bodyOnSurface(town, body, size, currentRoad = body.road) {
                 (surface.road.tags.bridge && surface.road.tags.bridge !== 'no' || surface.road.tags.tunnel && surface.road.tags.tunnel !== 'no'))) return false;
         }
     }
-    return !sceneryBodies(town).some(b => Math.hypot(b.x - body.x, b.y - body.y) < (b.length + b.width + body.length + body.width) / 2 && orientedBodiesOverlap(body, b, 0.15));
+    return !wallBodies(town).some(b => Math.hypot(b.x - body.x, b.y - body.y) < (b.length + b.width + body.length + body.width) / 2 && orientedBodiesOverlap(body, b, 0.03));
+}
+
+/** The shared physical surface guard for arbitrary, already scaled vehicle
+ * hulls. Emergency traffic and the player use the same paved boundary, scenery
+ * masks and connected bridge portals when choosing a safe place to move. */
+export function bodyOnPavedSurface(town, body, widthFactor = town.walking?.widthFactor || 3, { road = body?.road } = {}) {
+    if (!body || !road || ![body.x, body.y, body.angle, body.length, body.width, widthFactor].every(Number.isFinite) ||
+        body.length <= 0 || body.width <= 0 || widthFactor <= 0) return false;
+    return bodyOnSurface(town, { ...body, road, layer: body.layer ?? road.layer ?? 0 }, widthFactor, road);
 }
 
 /** Full rendered truck body on the paved corridor; also useful to audits. */
 export function fireEngineFits(town, widthFactor = town.fireEngine?.widthFactor || town.walking?.widthFactor || 3) {
     const engine = town.fireEngine;
     if (!engine?.active) return false;
-    return bodyOnSurface(town, engine.pose || renderedBody(engine, widthFactor), widthFactor);
+    return bodyOnPavedSurface(town, engine.pose || renderedBody(engine, widthFactor), widthFactor);
 }
 function renderedBody(engine, size) {
     return { x: engine.x, y: engine.y, angle: engine.angle, length: engine.length,
@@ -180,7 +201,7 @@ function addSpanBodies(result, town, span, size, kind, ownerId) {
 /** Static people/parked bodies and promised manoeuvre sweeps. Traffic uses the
  * same provider when choosing somewhere safe to pull over for the siren. */
 export function fireEngineObstacles(town, widthFactor = town.walking?.widthFactor || 3) {
-    const result = [...sceneryBodies(town)], sim = town.simulation;
+    const result = wallBodies(town), sim = town.simulation;
     for (const zone of sim.parking?.zones || []) for (const actor of sim.parking.visibleSlots(zone)) {
         const raw = sim.parking.parkedPosition(zone, actor.slot), road = town.map.roadById.get(raw.edge.way);
         const factor = styleFactor(road, widthFactor), p = sim.parking.parkedPosition(zone, actor.slot, factor);
@@ -218,42 +239,61 @@ export function fireEngineObstacles(town, widthFactor = town.walking?.widthFacto
     return result;
 }
 function carBody(town, car, size) {
-    if (town.simulation.emergency?.body) return town.simulation.emergency.body(car);
+    if (town.simulation.emergency?.body) return { ...town.simulation.emergency.body(car), car, ownerId: car.id,
+        kind: car.type === 'bicycle' ? 'cyclist' : car.parked ? 'parked car' : 'traffic' };
     const edges = town.map.data.edges;
     let index = Math.min(car.index, car.route.length - 1), d = car.q - car.length / 2 - car.offsets[index];
     while (d < 0 && index > 0) { index--; d += edges[car.route[index]].length; }
     const edge = edges[car.route[index]], road = town.map.roadById.get(edge.way), factor = styleFactor(road, size);
     const parked = town.simulation.parking?.pose?.(car, factor, 1);
-    if (parked) return { ...parked, length: car.length, width: car.width * factor, layer: road.layer };
+    if (parked) return { ...parked, length: car.length, width: car.width * factor, layer: road.layer, kind: 'parked car', car, ownerId: car.id };
     const p = position(edge, Math.max(0, d)), lateral = laneOffset(edge, car.lane || 0) * factor;
     return { x: p.x + p.dy * lateral, y: p.y - p.dx * lateral, angle: Math.atan2(p.dy, p.dx),
-        length: car.length, width: car.width * factor, layer: road.layer, kind: 'traffic' };
+        length: car.length, width: car.width * factor, layer: road.layer,
+        kind: car.type === 'bicycle' ? 'cyclist' : 'traffic', car, ownerId: car.id };
 }
 function collision(body, obstacles) {
     return obstacles.find(other => other && Math.hypot(body.x - other.x, body.y - other.y) <
-        (body.length + body.width + other.length + other.width) / 2 + 1 && orientedBodiesOverlap(body, other, 0.25));
+        (body.length + body.width + other.length + other.width) / 2 + 1 &&
+        orientedBodiesOverlap(body, other, other.kind === 'building' ? 0.03 : 0.25));
 }
 function obstaclesForMove(town, size) {
     return [...fireEngineObstacles(town, size), ...(town.simulation.cars || []).map(car => carBody(town, car, size))];
 }
 
-/** Choose an actual free lane on High Street, searching a bounded village area
- * rather than moving existing traffic out of the way. */
-export function startFireEngine(town, { widthFactor = town.walking?.widthFactor || 3 } = {}) {
-    const roads = town.map.roads.filter(road => road.tags.name === 'High Street' && road.layer === 0);
-    const target = town.map.landmarks?.find(p => p.id === 'village')?.p || [-294, -111];
-    const obstacles = obstaclesForMove(town, widthFactor), candidates = [];
-    for (const road of roads) for (const edge of road.edges) {
-        for (let d = 16; d < edge.length - 12; d += 5) {
-            const p = position(edge, d), factor = styleFactor(road, widthFactor);
-            const lateral = laneOffset(edge, 0) * factor;
-            candidates.push({ x: p.x + p.dy * lateral, y: p.y - p.dx * lateral,
-                angle: Math.atan2(p.dy, p.dx), road, layer: road.layer,
-                rank: Math.hypot(p.x - target[0], p.y - target[1]) });
-        }
+function movementPose(town, engine, x, y, angle, size) {
+    const next = { ...engine, x, y, angle }, body = renderedBody(next, size);
+    next.road = nearestRoad(town, body, engine.road); next.layer = next.road.layer;
+    body.road = next.road; body.layer = next.layer; body.width = next.width * styleFactor(next.road, size);
+    return { next, body };
+}
+function edgeSlide(town, engine, speed, h, size, obstacles) {
+    let guide = null, distance = Infinity;
+    for (const s of nearby(geometry(town).grid, engine)) {
+        if (s.road !== engine.road) continue;
+        const d = projection(engine, s).distance;
+        if (d < distance) { distance = d; guide = s; }
     }
-    candidates.sort((a, b) => a.rank - b.rank);
-    for (const candidate of candidates) {
+    if (!guide || !guide.square) return null;
+    let tangent = Math.atan2(guide.dy, guide.dx);
+    if (Math.cos(tangent - engine.angle) < 0) tangent += Math.PI;
+    const alignment = Math.cos(tangent - engine.angle);
+    // Only help a truck already travelling along a verge. A nose aimed at
+    // grass, water, a building or a closed end must still stop normally.
+    if (alignment < 0.82) return null;
+    const slipSpeed = Math.sign(speed) * Math.min(5, Math.abs(speed)) * alignment;
+    const angle = engine.angle + clamp(angleDifference(tangent, engine.angle), -0.65 * h, 0.65 * h);
+    const candidate = movementPose(town, engine, engine.x + Math.cos(tangent) * slipSpeed * h,
+        engine.y + Math.sin(tangent) * slipSpeed * h, angle, size);
+    if (collision(candidate.body, obstacles) || !bodyOnSurface(town, candidate.body, size, engine.road)) return null;
+    return { ...candidate, speed: slipSpeed };
+}
+
+/** Start on the real Common Lane fire station's paved apron, facing its road
+ * exit. Busy access remains a reason to wait rather than moving other actors. */
+export function startFireEngine(town, { widthFactor = town.walking?.widthFactor || 3 } = {}) {
+    const station = stationFor(town), obstacles = obstaclesForMove(town, widthFactor);
+    for (const candidate of station?.spawnCandidates || []) {
         const engine = { ...candidate, active: true, speed: 0, length: 9, width: 2.5, siren: true,
             distance: 0, blocked: '', widthFactor, steering: 0, braking: false, time: 0 };
         engine.pose = renderedBody(engine, widthFactor);
@@ -263,7 +303,8 @@ export function startFireEngine(town, { widthFactor = town.walking?.widthFactor 
         town.simulation.emergency?.setPlayer(engine.pose);
         return engine;
     }
-    town.fireEngine = { active: false, blocked: 'High Street is busy — try again shortly', speed: 0, siren: false };
+    town.fireEngine = { active: false, blocked: station ? 'The station forecourt is busy — try again shortly' :
+        'The fire station access is unavailable', speed: 0, siren: false };
     town.simulation.emergency?.setPlayer(null);
     return null;
 }
@@ -279,14 +320,17 @@ export function updateFireEngine(town, dt, input = {}, widthFactor = town.fireEn
     const throttle = clamp(Number(input.throttle) || 0, -1, 1), steer = clamp(Number(input.steer) || 0, -1, 1);
     engine.braking = Boolean(input.brake) || throttle && Math.sign(throttle) !== Math.sign(engine.speed) && Math.abs(engine.speed) > 0.3;
     engine.blocked = '';
+    engine.edgeAssist = false;
     const obstacles = obstaclesForMove(town, widthFactor);
     // Bounded small swept steps check rotation as well as translation. A large
     // caller dt cannot tunnel through a pedestrian, wall, kerb or reserved turn.
     const steps = Math.max(1, Math.ceil(Math.min(dt, 1) / 0.025)), h = Math.min(dt, 1) / steps;
     for (let i = 0; i < steps; i++) {
         engine.time += h;
-        const steeringTarget = steer * 0.5;
-        engine.steering += clamp(steeringTarget - engine.steering, -1.7 * h, 1.7 * h);
+        // Generous steering lock helps parking-speed village corners; limiting
+        // lock as speed rises prevents a held arrow making a sudden tight spin.
+        const steeringTarget = steer * (0.78 / (1 + (Math.abs(engine.speed) / 7) ** 2));
+        engine.steering += clamp(steeringTarget - engine.steering, -2.2 * h, 2.2 * h);
         let speed = engine.speed;
         if (engine.braking) speed = Math.sign(speed) * Math.max(0, Math.abs(speed) - 7 * h);
         else if (throttle) speed = clamp(speed + throttle * (throttle > 0 ? 3.4 : 2.5) * h, -3.5, 12);
@@ -294,19 +338,37 @@ export function updateFireEngine(town, dt, input = {}, widthFactor = town.fireEn
         if (Math.abs(speed) < 1e-9) speed = 0;
         const turn = speed / 5.7 * Math.tan(engine.steering) * h;
         const angle = engine.angle + turn, middle = engine.angle + turn / 2;
-        const next = { ...engine, x: engine.x + Math.cos(middle) * speed * h,
-            y: engine.y + Math.sin(middle) * speed * h, angle };
-        const body = renderedBody(next, widthFactor);
-        next.road = nearestRoad(town, body, engine.road); next.layer = next.road.layer;
-        body.road = next.road; body.layer = next.layer; body.width = next.width * styleFactor(next.road, widthFactor);
-        const obstruction = collision(body, obstacles);
-        if (!bodyOnSurface(town, body, widthFactor, engine.road) || obstruction) {
+        let { next, body } = movementPose(town, engine, engine.x + Math.cos(middle) * speed * h,
+            engine.y + Math.sin(middle) * speed * h, angle, widthFactor);
+        let obstruction = collision(body, obstacles);
+        let paved = bodyOnSurface(town, body, widthFactor, engine.road);
+        if (paved && obstruction?.kind === 'traffic' && obstruction.car && throttle &&
+            town.simulation.emergency?.tryNudge) {
+            const force = Math.min(8, Math.abs(speed) + Math.abs(throttle) * 0.8);
+            if (town.simulation.emergency.tryNudge(obstruction.car, body, force)) {
+                const freshImpact = engine.bumpId !== obstruction.car.id || engine.time - (engine.bumpTime ?? -Infinity) > 0.6;
+                engine.bumpId = obstruction.car.id; engine.bumpTime = engine.time;
+                engine.bumpKind = obstruction.car.type || 'car'; engine.bumpStrength = force;
+                if (freshImpact) { engine.bumpCount = (engine.bumpCount || 0) + 1; speed *= 0.82; }
+                Object.assign(obstruction, carBody(town, obstruction.car, widthFactor));
+                obstruction = collision(body, obstacles);
+            }
+        }
+        if ((!paved || obstruction?.kind === 'building') && (!obstruction || obstruction.kind === 'building') && Math.abs(speed) > 0.05) {
+            const slide = edgeSlide(town, engine, speed, h, widthFactor, obstacles);
+            if (slide) {
+                next = slide.next; body = slide.body; speed = slide.speed; paved = true; obstruction = null;
+                engine.edgeAssist = true;
+            }
+        }
+        if (!paved || obstruction) {
             engine.speed = 0;
             engine.blocked = obstruction ? obstruction.kind === 'pedestrian' ? 'Waiting for people to cross' :
                 obstruction.kind?.includes('manoeuvre') || obstruction.kind?.includes('turning') || obstruction.kind?.includes('overtaking') ? 'Waiting for a car to finish manoeuvring' : 'Waiting for a clear gap' : 'Stay on the road or pavement';
+            engine.time += (steps - i - 1) * h;
             break;
         }
-        engine.distance += Math.abs(speed * h);
+        engine.distance += Math.hypot(next.x - engine.x, next.y - engine.y);
         engine.x = next.x; engine.y = next.y; engine.angle = next.angle;
         engine.road = next.road; engine.layer = next.layer; engine.speed = speed;
         engine.pose = body;

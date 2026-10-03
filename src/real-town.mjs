@@ -11,7 +11,8 @@ import { attachBusServices, setBusTraffic, updateBusServices } from './real-buse
 import { attachStationVisits, resetStationTraffic, updateStationVisits, stationVehiclePose } from './station-visits.mjs';
 import { attachVillageDay, updateVillageDay } from './village-day.mjs';
 import { attachPurposefulJourneys, updatePurposefulJourneys, resetPurposefulJourneys } from './purposeful-journeys.mjs';
-import { fireEngineObstacles } from './fire-engine.mjs';
+import { fireEngineObstacles, bodyOnPavedSurface } from './fire-engine.mjs';
+import { FIRE_STATION, fireStationGeometry, projectFireStation } from './fire-station.mjs';
 export { position, laneCount, laneOffset, isSignal, isCirculatory, pathPoint };
 export { setCyclistCount, setPedestrianCount };
 export const BUS_STYLES = [
@@ -84,6 +85,7 @@ export function prepareMap(data) {
     const landmarks = [
         { id: 'village', name: 'High Street', p: [-294, -111], zoom: 100 },
         { id: 'station', name: 'Kings Langley station', p: station.p, zoom: 90 },
+        { id: FIRE_STATION.id, name: FIRE_STATION.name, p: Object.values(projectFireStation()), zoom: 135 },
         { id: 'common', name: 'Common Lane · primary school', p: [-787, -592], zoom: 100 },
         { id: 'love', name: 'Love Lane · secondary school', p: [-1046, -487], zoom: 100 },
         { id: 'j20', name: 'M25 junction 20', p: [140, 1210], zoom: 95 },
@@ -126,7 +128,8 @@ export function createRealTown(map, demand, seed, { cyclists = 24, pedestrians =
     simulation.maxVehicles = 2000;
     simulation.busShare = 0;
     simulation.setPopularity(3);
-    const town = { map, simulation, seed, trafficLevel: 1, baseTraffic: 250, metrics: null, metricClock: -1 };
+    const town = { map, simulation, seed, trafficLevel: 1, baseTraffic: 250, metrics: null, metricClock: -1,
+        fireStation: fireStationGeometry(map) };
     attachVillageDay(town, { period, initialMinutes });
     town.trains = createRailway(map);
     town.boats = createCanalBoats(map, seed);
@@ -142,6 +145,7 @@ export function createRealTown(map, demand, seed, { cyclists = 24, pedestrians =
             roadHalfWidth: p.road.baseWidth * factor / 2, layer: p.road.layer, widthFactor: factor };
     });
     simulation.emergency.setObstacleProvider(() => fireEngineObstacles(town, town.walking.widthFactor));
+    simulation.emergency.setSurfaceProvider(body => bodyOnPavedSurface(town, body, town.walking.widthFactor, { road: body.road }));
     simulation.crossingStop = (car, edge) => pedestrianTrafficLimit(town, car, edge);
     simulation.crossingSpawnAllowed = car => pedestrianSpawnAllowed(town, car) && simulation.adaptive.spawnAllowed(car) &&
         simulation.busOvertaking.spawnAllowed(car) && simulation.parking.spawnAllowed(car) && simulation.emergency.spawnAllowed(car);

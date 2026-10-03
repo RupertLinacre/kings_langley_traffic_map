@@ -364,6 +364,7 @@ export class Simulation {
           this.cars.includes(r.car) &&
           !r.car.parked && !r.car.turnaround &&
           (!this.parking.managesMotion(r.car) || r.car.q >= r.crossing) &&
+          (!this.emergency.managesMotion(r.car) || r.car.q >= r.crossing) &&
           r.car.q < r.crossing + r.car.length + 0.5 &&
           // An entered body still owns its crossing. An unused approach claim
           // must not hold other traffic while its driver waits at a bus stop,
@@ -377,7 +378,7 @@ export class Simulation {
     }
     const requests = [];
     for (const c of this.cars) {
-      if (c.parked || c.turnaround || this.parking.managesMotion(c)) continue;
+      if (c.parked || c.turnaround || this.parking.managesMotion(c) || this.emergency.managesMotion(c)) continue;
       const chain = [];
       let ringHorizon = null;
       let incomplete = false;
@@ -727,7 +728,7 @@ export class Simulation {
     this.reserve(occupied);
     const updates = [];
     for (const c of this.cars) {
-      if (c.parked || this.parking.managesMotion(c) || (c.turnaround && !c.turnaround.preparing)) {
+      if (c.parked || this.parking.managesMotion(c) || this.emergency.managesMotion(c) || (c.turnaround && !c.turnaround.preparing)) {
         resetDriverResponse(c);
         continue;
       }

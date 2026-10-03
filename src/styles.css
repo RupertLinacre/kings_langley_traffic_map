@@ -80,33 +80,43 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 .fire-mode-button small { display: block; margin-top: 5px; color: #a47766; font-size: 9px; font-weight: 400; }
 .fire-mode-arrow { margin-left: auto; font-size: 20px !important; }
 .fire-engine-hud { position: fixed; z-index: 12; bottom: 40px; left: 50%; display: flex; align-items: flex-end; gap: 16px; transform: translateX(-50%); }
-.fire-dashboard { width: 390px; padding: 15px 18px 12px; border: 1px solid #cabfae; border-radius: 13px; background: #fffdf6f5; box-shadow: 0 8px 35px #30422e25; backdrop-filter: blur(8px); }
+.fire-dashboard { display: grid; grid-template-columns: auto auto; align-items: center; gap: 0 12px; width: auto; max-width: calc(100vw - 36px); padding: 8px 10px; border: 1px solid #cabfae; border-radius: 9px; background: #fffdf6f5; box-shadow: 0 5px 22px #30422e18; backdrop-filter: blur(8px); }
 .fire-dashboard-title { display: flex; align-items: center; gap: 10px; }
-.fire-dashboard-title strong { display: block; font-family: "Iowan Old Style", Palatino, Georgia, serif; font-size: 25px; font-weight: 400; letter-spacing: -.7px; }
+.fire-dashboard-title strong { display: block; font-size: 11px; font-weight: 600; }
 .fire-dashboard-title span:not(.blue-beacon) { display: block; margin-top: 2px; color: #817362; font-size: 10px; }
-.fire-dashboard-title output { margin-left: auto; color: #9a463c; font-size: 20px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.fire-dashboard-title output { margin-left: 5px; color: #9a463c; font-size: 15px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .blue-beacon { width: 8px; height: 22px; border-radius: 4px; background: #3b91cd; box-shadow: 0 0 10px #3b91cd65; }
 .fire-engine-hud.siren-off .blue-beacon { background: #9da7a5; box-shadow: none; }
-.fire-driving-status { margin: 11px 0 5px; color: #667b65; font-size: 11px; }
-.fire-key-hint { margin: 0 0 10px; color: #918d80; font-size: 10px; }
-.fire-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
-.fire-actions button { min-height: 35px; padding: 8px; border: 1px solid #ded8c9; border-radius: 5px; color: #726754; background: #f7f5ed; font-size: 10px; }
+.fire-driving-status { display: none; grid-column: 1 / -1; grid-row: 2; margin: 8px 0 0; max-width: 390px; color: #667b65; font-size: 10px; }
+.fire-engine-hud.has-blockage .fire-driving-status { display: block; }
+.fire-key-hint { display: none; grid-column: 1 / -1; grid-row: 3; margin: 8px 0 0; color: #918d80; font-size: 10px; }
+.fire-engine-hud.controls-expanded .fire-key-hint { display: block; }
+.fire-actions { display: flex; grid-column: 2; grid-row: 1; gap: 4px; align-items: center; }
+.fire-actions button { display: flex; align-items: center; justify-content: center; gap: 5px; width: 32px; min-height: 32px; padding: 6px; border: 1px solid #ded8c9; border-radius: 5px; color: #726754; background: #f7f5ed; font-size: 10px; }
+.fire-actions svg { width: 17px; height: 17px; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+.fire-action-copy { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; clip-path: inset(50%); overflow: hidden; white-space: nowrap; }
+.fire-pace-wrap select { width: 52px; height: 32px; padding: 0 5px; text-align: center; font-size: 11px; }
 .fire-actions button[aria-pressed="true"] { background: #e7f0f6; border-color: #b2d0df; color: #326783; }
 .fire-actions #fire-leave { background: #f6e6dc; color: #963f37; border-color: #e0c4b3; }
-.fire-control-pad { display: grid; grid-template: repeat(3, 48px) / repeat(3, 48px); gap: 5px; user-select: none; -webkit-user-select: none; }
+.fire-control-pad { display: none; grid-template: repeat(3, 48px) / repeat(3, 48px); gap: 5px; user-select: none; -webkit-user-select: none; }
+.fire-engine-hud.controls-expanded .fire-control-pad { display: grid; }
 .fire-control-pad button { touch-action: none; padding: 0; border: 1px solid #c8cebc; border-radius: 12px; color: #475d48; background: #fffdf6ed; font-size: 24px; box-shadow: 0 3px 7px #30422e16; }
 .fire-control-pad button.held { background: #3d6655; color: #fffdf6; border-color: #3d6655; transform: translateY(2px); box-shadow: none; }
 .drive-forward { grid-area: 1 / 2; }.drive-left { grid-area: 2 / 1; }.drive-brake { grid-area: 2 / 2; font-size: 10px !important; font-weight: 700; }.drive-right { grid-area: 2 / 3; }.drive-reverse { grid-area: 3 / 2; }
 .driving-fire-engine .status-dock, .driving-fire-engine .map-hint, .driving-fire-engine .selection-panel { display: none; }
-.driving-fire-engine .app-toast { bottom: 300px; left: 50%; max-width: min(360px, calc(100vw - 24px)); }
+.driving-fire-engine .app-toast { bottom: 112px; left: 50%; max-width: min(360px, calc(100vw - 24px)); }
+body:has(.fire-engine-hud.controls-expanded) .app-toast { bottom: 260px; }
 .driving-fire-engine .map-footer .map-caption { color: #995b4c; }
 .driving-fire-engine .map-footer .map-caption::after { content: " · Roads & pavements only"; }
 @media (max-width: 720px) {
   .fire-engine-hud { left: 12px; right: 12px; bottom: max(35px, calc(env(safe-area-inset-bottom) + 25px)); transform: none; gap: 9px; align-items: flex-end; }
-  .fire-dashboard { flex: 1; width: auto; min-width: 0; padding: 12px; }
-  .fire-dashboard-title { gap: 7px; }.fire-dashboard-title strong { font-size: 20px; }.fire-dashboard-title output { font-size: 14px; }.blue-beacon { width: 5px; }
-  .fire-control-pad { grid-template: repeat(3, 40px) / repeat(3, 35px); gap: 3px; }.fire-control-pad button { border-radius: 9px; font-size: 21px; }
-  .fire-key-hint { display: none; }.fire-driving-status { font-size: 10px; line-height: 1.5; }.fire-actions button { font-size: 9px; min-height: 35px; padding: 4px; }
+  .fire-dashboard { display: block; flex: 1; width: auto; min-width: 0; padding: 10px; }
+  .fire-dashboard-title { gap: 7px; }.fire-dashboard-title strong { font-family: "Iowan Old Style", Palatino, Georgia, serif; font-size: 20px; font-weight: 400; }.fire-dashboard-title output { margin-left: auto; font-size: 14px; }.blue-beacon { width: 5px; }
+  .fire-control-pad { display: grid; grid-template: repeat(3, 40px) / repeat(3, 35px); gap: 3px; }.fire-control-pad button { border-radius: 9px; font-size: 21px; }
+  .fire-key-hint, .fire-engine-hud.controls-expanded .fire-key-hint { display: none; }.fire-driving-status { display: block; margin: 8px 0; font-size: 10px; line-height: 1.5; }
+  .fire-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }.fire-actions button { width: auto; font-size: 9px; min-height: 35px; padding: 4px; }.fire-actions svg, #fire-help { display: none; }
+  .fire-action-copy { position: static; width: auto; height: auto; margin: 0; clip-path: none; overflow: visible; white-space: normal; }
+  .fire-pace-wrap { grid-column: 1 / -1; }.fire-pace-wrap select { width: 100%; height: 30px; }
   .driving-fire-engine:not(.controls-collapsed) .fire-engine-hud { visibility: hidden; }
 }
 .control-section { margin-top: 19px; }
@@ -315,6 +325,7 @@ details > summary::-webkit-details-marker { display: none; }
   .map-hint, .controls-collapsed .map-hint { left: 12px; bottom: max(112px, calc(env(safe-area-inset-bottom) + 102px)); max-width: min(270px, calc(100vw - 78px)); font-size: 11px; }
   body:not(.controls-collapsed) .map-hint { display: none; }
   .app-toast, .controls-collapsed .app-toast { left: 50%; bottom: max(122px, calc(env(safe-area-inset-bottom) + 112px)); width: max-content; max-width: calc(100vw - 40px); font-size: 12px; }
+  body.driving-fire-engine .app-toast { bottom: max(320px, calc(env(safe-area-inset-bottom) + 310px)); }
   body:has(#selection-panel:not([hidden])) .app-toast { bottom: max(320px, calc(env(safe-area-inset-bottom) + 310px)); }
   .map-footer { left: 12px; right: 12px; bottom: max(9px, env(safe-area-inset-bottom)); gap: 5px; font-size: 8px; justify-content: flex-end; }
   .map-caption { display: none; }
