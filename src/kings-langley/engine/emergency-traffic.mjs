@@ -1,12 +1,16 @@
 import { position, canTurn } from './graph.mjs';
 import { laneCount, laneOffset } from './traffic-model.mjs';
 import { orientedBodiesOverlap } from '../../body-geometry.mjs';
+import { BodySpatialIndex } from '../../body-spatial-index.mjs';
 
 const layerOf = value => Number(value?.layer ?? value?.road?.layer ?? 0) || 0;
 const edgeLayer = edge => Number(edge.tags.layer) || (edge.tags.bridge && edge.tags.bridge !== 'no' ? 1 : 0);
 const sameLayer = (a, b) => layerOf(a) === layerOf(b);
 const radius = body => Math.hypot(body.length, body.width) / 2;
-const nearby = (a, b, extra = 0) => Math.hypot(a.x - b.x, a.y - b.y) <= radius(a) + radius(b) + extra;
+const nearby = (a, b, extra = 0) => {
+  const reach = radius(a) + radius(b) + extra, dx = a.x - b.x, dy = a.y - b.y;
+  return dx * dx + dy * dy <= reach * reach;
+};
 const clamp = (n, low, high) => Math.max(low, Math.min(high, n));
 export const SIREN_HEARING_DISTANCE = 600;
 
@@ -49,14 +53,54 @@ export class EmergencyTraffic {
     }
   }
   setPlayer(player) {
+    this.endMotionQueries();
     this.player = player?.active ? { ...player, length: player.length || 9, width: player.width || 2.5,
       layer: layerOf(player) } : null;
     this.gaps.clear();
     this.sirenPath = undefined;
   }
-  setPoseProvider(provider) { this.poseProvider = provider; this.gaps.clear(); }
-  setObstacleProvider(provider) { this.obstacleProvider = provider; }
-  setSurfaceProvider(provider) { this.surfaceProvider = provider; this.gaps.clear(); }
+  setPoseProvider(provider) { this.endMotionQueries(); this.poseProvider = provider; this.gaps.clear(); }
+  setObstacleProvider(provider) { this.endMotionQueries(); this.obstacleProvider = provider; this.gaps.clear(); }
+  setSurfaceProvider(provider) { this.endMotionQueries(); this.surfaceProvider = provider; this.gaps.clear(); }
+  /** The simulation explicitly brackets the unchanged-body interval between
+   * controller manoeuvres and its bulk motion commit. Public standalone
+   * queries remain uncached so direct changes to cars/providers stay visible.
+   */
+  beginMotionQueries() {
+    this.endMotionQueries();
+    if (!this.player && !this.states.size) return;
+    this.motionQueriesActive = true;
+  }
+  prepareMotionQueries(displaced) {
+    if (!this.motionBodies)
+      this.motionBodies = new Map(this.sim.cars.map(car => [car.id, this.body(car)]));
+    if (displaced) {
+      this.motionTraffic ||= new BodySpatialIndex(this.motionBodies.values());
+      if (!this.motionObstacles) {
+        this.obstacles = this.obstacleProvider?.() || [];
+        this.motionObstacles = new BodySpatialIndex(this.obstacles);
+      }
+    } else if (!this.motionDisplaced) {
+      const shifted = [];
+      for (const [id, state] of this.states) if (Math.abs(state.offset || 0) > 0.02 && this.motionBodies.has(id))
+        shifted.push(this.motionBodies.get(id));
+      this.motionDisplaced = new BodySpatialIndex(shifted);
+    }
+  }
+  endMotionQueries() {
+    this.motionQueriesActive = false;
+    this.motionHasDisplaced = undefined;
+    this.motionBodies = this.motionTraffic = this.motionDisplaced = this.motionObstacles = null;
+    this.gaps.clear();
+  }
+  replaceBody(bodies, id, body) {
+    const index = bodies.spatialIndex;
+    if (index) {
+      index.remove(bodies.get(id));
+      index.insert(body);
+    }
+    bodies.set(id, body);
+  }
   body(car, q = car.q, offset = undefined) {
     let index = Math.min(car.index, car.route.length - 1);
     while (index > 0 && q < car.offsets[index]) index--;
@@ -203,7 +247,10 @@ export class EmergencyTraffic {
       this.states.set(car.id, state); this.owners.set(car.id, car);
     }
     // Reroutes retain this driver/body but may use a new route coordinate.
-    if (state.route !== car.route) { state.route = car.route; state.reverse = null; state.stopQ = car.q; }
+    if (state.route !== car.route) {
+      state.route = car.route; state.reverse = null; state.stopQ = car.q;
+      this.endMotionQueries();
+    }
     car.emergencyYield = state;
     return state;
   }
@@ -229,11 +276,11 @@ export class EmergencyTraffic {
   safePose(car, q, offset, bodies, obstacles, player = this.player, margin = 0.3) {
     const candidate = this.body(car, q, offset);
     if (!this.onSurface(car, candidate, q)) return false;
-    for (const other of [...bodies.values(), ...obstacles, ...(player ? [player] : [])]) {
-      if (other.ownerId === car.id || other === car || !sameLayer(candidate, other) || !nearby(candidate, other, 0.5)) continue;
-      if (orientedBodiesOverlap(candidate, other, margin)) return false;
-    }
-    return true;
+    const blocks = other => other.ownerId !== car.id && other !== car &&
+      sameLayer(candidate, other) && nearby(candidate, other, 0.5) && orientedBodiesOverlap(candidate, other, margin);
+    for (const other of bodies.query?.(candidate, 0.5) || bodies.values()) if (blocks(other)) return false;
+    for (const other of obstacles.query?.(candidate, 0.5) || obstacles) if (blocks(other)) return false;
+    return !player || !blocks(player);
   }
   safeSweep(car, q, offset, bodies, obstacles, player = this.player, margin = 0.3) {
     const from = this.states.get(car.id)?.offset || 0;
@@ -247,6 +294,7 @@ export class EmergencyTraffic {
     return [...this.states.entries()].filter(([id, s]) => id !== except && s.reverse).map(([, s]) => s.reverse.pocket);
   }
   commitPosition(car, q) {
+    this.endMotionQueries();
     car.q = q;
     while (car.index > 0 && q < car.offsets[car.index]) car.index--;
     while (car.index < car.route.length - 1 && q >= car.offsets[car.index + 1]) car.index++;
@@ -326,7 +374,7 @@ export class EmergencyTraffic {
     return false;
   }
   update(dt) {
-    this.gaps.clear();
+    this.endMotionQueries();
     if (!this.player && !this.states.size) return;
     const alive = new Set(this.sim.cars.map(c => c.id));
     for (const id of this.states.keys()) if (!alive.has(id)) {
@@ -334,7 +382,12 @@ export class EmergencyTraffic {
       this.owners.delete(id); this.states.delete(id);
     }
     const bodies = new Map(this.sim.cars.map(car => [car.id, this.body(car)]));
+    bodies.query = (candidate, margin) => {
+      bodies.spatialIndex ||= new BodySpatialIndex(bodies.values());
+      return bodies.spatialIndex.query(candidate, margin);
+    };
     const obstacles = this.obstacleProvider?.() || [];
+    let obstacleIndex;
     this.obstacles = obstacles;
     for (const car of this.sim.cars) {
       const body = bodies.get(car.id), heard = this.hearsSiren(car, body);
@@ -353,14 +406,18 @@ export class EmergencyTraffic {
       if (!state.active && state.reverse) state.reverse = null;
       if (!state.active || state.clearing) state.stopQ = null;
       else state.stopQ ??= car.q + (car.v < 0.3 ? 0 : car.v * 0.35 + car.v * car.v / 6.5);
-      const blockers = [...obstacles, ...this.reservedBodies(car.id)];
+      const blockers = this.reservedBodies(car.id);
+      blockers.query = (candidate, margin) => {
+        obstacleIndex ||= new BodySpatialIndex(obstacles);
+        return [...obstacleIndex.query(candidate, margin), ...blockers];
+      };
       if (state.nudgedUntil > this.sim.time) { state.phase = 'nudged'; state.reversing = state.nudgeReverse; continue; }
       if (state.reverse) {
         const q = Math.max(state.reverse.q, car.q - dt * 1.4);
         if (this.safeSweep(car, q, state.offset, bodies, blockers)) {
           this.commitPosition(car, q); state.managedAt = this.sim.time; state.reversing = true;
           state.reverse.blocked = 0; state.stopQ = car.q; state.phase = 'backing-up'; car.stopped = 0;
-          bodies.set(car.id, this.body(car));
+          this.replaceBody(bodies, car.id, this.body(car));
           if (q <= state.reverse.q + 1e-6) state.reverse = null;
         } else if ((state.reverse.blocked += dt) > 2) state.reverse = null;
         continue;
@@ -373,7 +430,7 @@ export class EmergencyTraffic {
       if (Math.abs(proposed - state.offset) > 1e-8 && this.safeSweep(car, car.q, proposed, bodies, blockers)) {
         state.offset = proposed;
         state.phase = state.active ? 'pulling-in' : 'returning';
-        bodies.set(car.id, this.body(car));
+        this.replaceBody(bodies, car.id, this.body(car));
       } else if (state.active && !state.clearing && target > state.offset + 0.8) {
         this.planReverse(car, state, bodies, blockers);
       }
@@ -384,22 +441,28 @@ export class EmergencyTraffic {
     }
   }
   speed(car) { return this.states.get(car.id)?.active ? 8 : Infinity; }
-  physicalGap(car) {
+  physicalGap(car, maximum = Infinity) {
     if (!this.player && !this.states.size) return Infinity;
     const state = this.states.get(car.id);
     if (state?.route !== car.route && state) this.ensureState(car);
     const cached = this.gaps.get(car.id);
-    if (cached?.q === car.q && cached.offset === state?.offset) return cached.gap;
+    if (cached?.q === car.q && cached.offset === state?.offset && cached.maximum >= maximum) return cached.gap;
     const displaced = Math.abs(state?.offset || 0) > 0.02;
-    const current = this.body(car), horizon = Math.min(displaced ? Math.max(15, car.v * car.v / 4 + 8) : 90,
+    if (this.motionQueriesActive) {
+      this.motionHasDisplaced ??= [...this.states.values()].some(other => Math.abs(other.offset || 0) > 0.02);
+      if (displaced || this.motionHasDisplaced) this.prepareMotionQueries(displaced);
+    }
+    const current = this.motionBodies?.get(car.id) || this.body(car), horizon = Math.min(maximum, displaced ? Math.max(15, car.v * car.v / 4 + 8) : 90,
       Math.max(0, car.offsets.at(-1) - car.q));
     const blockers = [...(this.player ? [this.player] : []), ...this.reservedBodies(car.id)];
-    if (displaced) blockers.push(...(this.obstacles || []));
-    const traffic = displaced ? this.sim.cars : [...this.states.entries()]
-      .filter(([, other]) => Math.abs(other.offset || 0) > 0.02).map(([id]) => this.owners.get(id)).filter(Boolean);
-    for (const other of traffic) {
-      if (other === car) continue;
-      if (displaced || Math.abs(this.states.get(other.id)?.offset || 0) > 0.02) {
+    if (displaced) blockers.push(...(this.motionObstacles?.query(current, horizon + 1) || this.obstacles || []));
+    const index = displaced ? this.motionTraffic : this.motionDisplaced;
+    if (index) blockers.push(...index.query(current, horizon + 1));
+    else {
+      const traffic = displaced ? this.sim.cars : [...this.states.entries()]
+        .filter(([, other]) => Math.abs(other.offset || 0) > 0.02).map(([id]) => this.owners.get(id)).filter(Boolean);
+      for (const other of traffic) {
+        if (other === car) continue;
         const body = this.body(other);
         if (nearby(current, body, horizon + 1)) blockers.push(body);
       }
@@ -427,15 +490,21 @@ export class EmergencyTraffic {
         }
       }
     }
-    this.gaps.set(car.id, { q: car.q, offset: state?.offset, gap });
+    this.gaps.set(car.id, { q: car.q, offset: state?.offset, maximum, gap });
     return gap;
   }
   gap(car) {
     const state = this.states.get(car.id);
-    return Math.min(this.physicalGap(car), state?.active && !state.clearing && state.stopQ !== null ?
-      Math.max(0, state.stopQ - car.q) + car.minGap : Infinity);
+    const stop = state?.active && !state.clearing && state.stopQ !== null ?
+      Math.max(0, state.stopQ - car.q) + car.minGap : Infinity;
+    // A closer established siren stop already bounds this car's travel. Do
+    // not sweep tens of metres of unused pavement for a stationary queue.
+    return Math.min(this.physicalGap(car, stop), stop);
   }
-  limitMove(car, move) { return Math.max(0, Math.min(move, this.physicalGap(car) - 0.15)); }
+  limitMove(car, move) {
+    if (!(move > 0)) return 0;
+    return Math.max(0, Math.min(move, this.physicalGap(car, move + 0.15) - 0.15));
+  }
   spawnAllowed(car) {
     if (!this.player && !this.states.size) return true;
     const body = this.body(car);

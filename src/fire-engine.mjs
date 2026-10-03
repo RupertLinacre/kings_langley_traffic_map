@@ -5,6 +5,7 @@ import { groupPose } from './purposeful-journeys.mjs';
 import { stationPassengerPose, stationReservedBodies } from './station-visits.mjs';
 import { pathPoint } from './street-geometry.mjs';
 import { orientedBodiesOverlap } from './body-geometry.mjs';
+import { BodySpatialIndex } from './body-spatial-index.mjs';
 import { fireStationGeometry, fireStationContainsPoint } from './fire-station.mjs';
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
@@ -13,6 +14,9 @@ const styleFactor = (road, size) => Math.min(size * (road.size || 1), road.width
 const geometries = new WeakMap();
 const buildingGeometry = new WeakMap();
 const stations = new WeakMap();
+const wallGeometry = new WeakMap();
+const surfaceStyles = new WeakMap();
+const sampleLayouts = new Map();
 const CELL = 48;
 const PAVEMENT = 3;
 // The map and simulation use metres and seconds, including accelerated play.
@@ -82,17 +86,22 @@ function geometry(town) {
     geometries.set(town.map, result);
     return result;
 }
-function halfSurface(road, size, p, s) {
+function surfaceStyle(road, size) {
+    const tags = road.tags || {}, cached = surfaceStyles.get(road);
+    if (cached && cached.size === size && cached.baseWidth === road.baseWidth && cached.roadSize === road.size &&
+        cached.cap === road.widthCap && cached.highway === tags.highway && cached.sidewalk === tags.sidewalk &&
+        cached.foot === tags.foot && cached.bridge === tags.bridge && cached.tunnel === tags.tunnel && cached.layer === road.layer) return cached;
     const half = road.baseWidth * styleFactor(road, size) / 2;
     // Use the visible pavement border. Where the map explicitly excludes a
     // pavement, the appliance must remain on the asphalt itself.
-    const tags = road.tags || {};
-    let pavement = /motorway|trunk/.test(tags.highway) || tags.sidewalk === 'no' || tags.sidewalk === 'separate' || tags.foot === 'no' ? 0 : PAVEMENT;
-    if (tags.sidewalk === 'left' || tags.sidewalk === 'right') {
-        const left = s.dx * (p.y - s.a.y) - s.dy * (p.x - s.a.x) < 0;
-        if (left !== (tags.sidewalk === 'left')) pavement = 0;
-    }
-    return half + pavement - 0.12;
+    const pavement = /motorway|trunk/.test(tags.highway) || tags.sidewalk === 'no' || tags.sidewalk === 'separate' || tags.foot === 'no' ? 0 : PAVEMENT;
+    const style = { size, baseWidth: road.baseWidth, roadSize: road.size, cap: road.widthCap,
+        highway: tags.highway, sidewalk: tags.sidewalk, foot: tags.foot, bridge: tags.bridge, tunnel: tags.tunnel, layer: road.layer,
+        left: half + (tags.sidewalk === 'right' ? 0 : pavement) - 0.12,
+        right: half + (tags.sidewalk === 'left' ? 0 : pavement) - 0.12,
+        crossing: Boolean(tags.bridge && tags.bridge !== 'no' || tags.tunnel && tags.tunnel !== 'no') };
+    surfaceStyles.set(road, style);
+    return style;
 }
 function portals(town, road) {
     const geo = geometry(town);
@@ -108,11 +117,23 @@ function portals(town, road) {
     geo.portals.set(road, result);
     return result;
 }
-function fullBodySamples(body) {
-    const c = Math.cos(body.angle), s = Math.sin(body.angle), points = [];
-    const nx = Math.ceil(body.length / 0.65), ny = Math.ceil(body.width / 0.65);
+function sampleLayout(length, width) {
+    const key = `${length}:${width}`;
+    if (sampleLayouts.has(key)) return sampleLayouts.get(key);
+    const nx = Math.ceil(length / 0.65), ny = Math.ceil(width / 0.65);
+    const offsets = new Float64Array((nx + 1) * (ny + 1) * 2);
+    let at = 0;
     for (let i = 0; i <= nx; i++) for (let j = 0; j <= ny; j++) {
-        const x = (i / nx - 0.5) * body.length, y = (j / ny - 0.5) * body.width;
+        offsets[at++] = (i / nx - 0.5) * length; offsets[at++] = (j / ny - 0.5) * width;
+    }
+    if (sampleLayouts.size >= 128) sampleLayouts.clear();
+    sampleLayouts.set(key, offsets);
+    return offsets;
+}
+function fullBodySamples(body) {
+    const c = Math.cos(body.angle), s = Math.sin(body.angle), points = [], offsets = sampleLayout(body.length, body.width);
+    for (let i = 0; i < offsets.length; i += 2) {
+        const x = offsets[i], y = offsets[i + 1];
         points.push({ x: body.x + c * x - s * y, y: body.y + s * x + c * y });
     }
     return points;
@@ -131,31 +152,60 @@ function stationFor(town) {
     if (!stations.has(town.map)) stations.set(town.map, fireStationGeometry(town.map));
     return stations.get(town.map);
 }
-function wallBodies(town) {
-    return [...sceneryBodies(town), ...(stationFor(town)?.buildings || []).map(b => ({ ...b, kind: 'building' }))];
+function wallsFor(town) {
+    const scenery = town.scenery || town.fireEngineScenery, station = stationFor(town), cached = wallGeometry.get(town);
+    if (cached && cached.scenery === scenery && cached.station === station) return cached;
+    const bodies = [...sceneryBodies(town), ...(station?.buildings || []).map(b => ({ ...b, kind: 'building' }))];
+    const walls = { scenery, station, bodies, index: new BodySpatialIndex(bodies) };
+    wallGeometry.set(town, walls);
+    return walls;
 }
+const wallBodies = town => wallsFor(town).bodies;
 function bodyOnSurface(town, body, size, currentRoad = body.road) {
     const geo = geometry(town), joins = portals(town, currentRoad), station = stationFor(town);
     const limit = body.length + body.width + 2;
-    for (const p of fullBodySamples(body)) {
-        const surfaces = nearby(geo.grid, p).filter(s => {
+    const offsets = sampleLayout(body.length, body.width), c = Math.cos(body.angle), sin = Math.sin(body.angle);
+    // Reuse each occupied grid cell's descriptors within this exact query.
+    // Width/tag changes are still observed by surfaceStyle on every new call.
+    const cells = new Map();
+    for (let i = 0; i < offsets.length; i += 2) {
+        const x = offsets[i], y = offsets[i + 1], px = body.x + c * x - sin * y, py = body.y + sin * x + c * y;
+        const key = `${Math.floor(px / CELL)}:${Math.floor(py / CELL)}`;
+        let cell = cells.get(key);
+        if (!cell) {
+            cell = { surfaces: (geo.grid.get(key) || []).map(s => ({ s, style: surfaceStyle(s.road, size) })),
+                masks: [...(geo.water.get(key) || []), ...(geo.rails.get(key) || [])] };
+            cells.set(key, cell);
+        }
+        let hazardLayers = null;
+        for (const s of cell.masks) {
+            const raw = ((px - s.a.x) * s.dx + (py - s.a.y) * s.dy) / (s.square || 1), t = clamp(raw, 0, 1);
+            const dx = px - s.a.x - s.dx * t, dy = py - s.a.y - s.dy * t;
+            if (dx * dx + dy * dy < (s.radius + 0.1) ** 2) {
+                hazardLayers ||= [];
+                if (!hazardLayers.includes(s.layer)) hazardLayers.push(s.layer);
+            }
+        }
+        let surface = false, crossed = 0;
+        for (const { s, style } of cell.surfaces) {
             if ((s.road.layer || 0) !== (body.layer || 0) && !joins.some(join =>
                 (join.road === s.road || s.road === currentRoad && join.road.layer === body.layer) &&
-                Math.hypot(join.point.x - p.x, join.point.y - p.y) <= limit)) return false;
-            const projected = projection(p, s);
-            if (s.road.layer > 0 && (s.first && projected.raw < 0 || s.last && projected.raw > 1)) return false;
-            return projected.distance <= halfSurface(s.road, size, p, s);
-        });
-        if (!surfaces.length && !fireStationContainsPoint(station, { ...p, layer: body.layer })) return false;
-        // Only a surveyed road bridge/tunnel may carry a body over water or
-        // rails; a nearby enlarged street cannot manufacture such a crossing.
-        for (const mask of [geo.water, geo.rails]) for (const s of nearby(mask, p)) {
-            if (projection(p, s).distance >= s.radius + 0.1) continue;
-            if (!surfaces.some(surface => (surface.road.layer || 0) !== s.layer &&
-                (surface.road.tags.bridge && surface.road.tags.bridge !== 'no' || surface.road.tags.tunnel && surface.road.tags.tunnel !== 'no'))) return false;
+                Math.hypot(join.point.x - px, join.point.y - py) <= limit)) continue;
+            const raw = ((px - s.a.x) * s.dx + (py - s.a.y) * s.dy) / (s.square || 1), t = clamp(raw, 0, 1);
+            if (s.road.layer > 0 && (s.first && raw < 0 || s.last && raw > 1)) continue;
+            const dx = px - s.a.x - s.dx * t, dy = py - s.a.y - s.dy * t;
+            const half = s.dx * (py - s.a.y) - s.dy * (px - s.a.x) < 0 ? style.left : style.right;
+            if (dx * dx + dy * dy > half * half) continue;
+            surface = true;
+            if (!hazardLayers) break;
+            if (style.crossing) for (let j = 0; j < hazardLayers.length; j++)
+                if ((s.road.layer || 0) !== hazardLayers[j]) crossed |= 1 << j;
+            if (crossed === (1 << hazardLayers.length) - 1) break;
         }
+        if (!surface && !fireStationContainsPoint(station, { x: px, y: py, layer: body.layer })) return false;
+        if (hazardLayers && crossed !== (1 << hazardLayers.length) - 1) return false;
     }
-    return !wallBodies(town).some(b => Math.hypot(b.x - body.x, b.y - body.y) < (b.length + b.width + body.length + body.width) / 2 && orientedBodiesOverlap(body, b, 0.03));
+    return !wallsFor(town).index.query(body, 0.03).some(b => orientedBodiesOverlap(body, b, 0.03));
 }
 
 /** The shared physical surface guard for arbitrary, already scaled vehicle
@@ -203,8 +253,8 @@ function addSpanBodies(result, town, span, size, kind, ownerId) {
 
 /** Static people/parked bodies and promised manoeuvre sweeps. Traffic uses the
  * same provider when choosing somewhere safe to pull over for the siren. */
-export function fireEngineObstacles(town, widthFactor = town.walking?.widthFactor || 3) {
-    const result = wallBodies(town), sim = town.simulation;
+function movingObstacles(town, widthFactor) {
+    const result = [], sim = town.simulation;
     for (const zone of sim.parking?.zones || []) for (const actor of sim.parking.visibleSlots(zone)) {
         const raw = sim.parking.parkedPosition(zone, actor.slot), road = town.map.roadById.get(raw.edge.way);
         const factor = styleFactor(road, widthFactor), p = sim.parking.parkedPosition(zone, actor.slot, factor);
@@ -246,6 +296,9 @@ export function fireEngineObstacles(town, widthFactor = town.walking?.widthFacto
     result.push(...stationReservedBodies(town));
     return result;
 }
+export function fireEngineObstacles(town, widthFactor = town.walking?.widthFactor || 3) {
+    return [...wallBodies(town), ...movingObstacles(town, widthFactor)];
+}
 function carBody(town, car, size) {
     if (town.simulation.emergency?.body) return { ...town.simulation.emergency.body(car), car, ownerId: car.id,
         kind: car.type === 'bicycle' ? 'cyclist' : car.parked ? 'parked car' : 'traffic' };
@@ -261,12 +314,16 @@ function carBody(town, car, size) {
         kind: car.type === 'bicycle' ? 'cyclist' : 'traffic', car, ownerId: car.id };
 }
 function collision(body, obstacles) {
-    return obstacles.find(other => other && Math.hypot(body.x - other.x, body.y - other.y) <
+    const nearbyBodies = obstacles.query ? obstacles.query(body, 0.3) : obstacles;
+    return nearbyBodies.find(other => other && Math.hypot(body.x - other.x, body.y - other.y) <
         (body.length + body.width + other.length + other.width) / 2 + 1 &&
         orientedBodiesOverlap(body, other, other.kind === 'building' ? 0.03 : 0.25));
 }
 function obstaclesForMove(town, size) {
-    return [...fireEngineObstacles(town, size), ...(town.simulation.cars || []).map(car => carBody(town, car, size))];
+    const walls = wallsFor(town).index;
+    const moving = new BodySpatialIndex([...movingObstacles(town, size), ...(town.simulation.cars || []).map(car => carBody(town, car, size))]);
+    return { query: (body, margin) => [...walls.query(body, margin), ...moving.query(body, margin)],
+        update: body => moving.update(body) };
 }
 
 function movementPose(town, engine, x, y, angle, size) {
@@ -443,6 +500,7 @@ export function updateFireEngine(town, dt, input = {}, widthFactor = town.fireEn
                 engine.bumpKind = obstruction.car.type || 'car'; engine.bumpStrength = force;
                 if (freshImpact) { engine.bumpCount = (engine.bumpCount || 0) + 1; speed *= 0.82; }
                 Object.assign(obstruction, carBody(town, obstruction.car, widthFactor));
+                obstacles.update(obstruction);
                 obstruction = collision(body, obstacles);
             }
         }

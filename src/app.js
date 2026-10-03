@@ -134,9 +134,13 @@ function tick(timestamp) {
     if (!town || document.hidden) return;
     if (!paused) {
         if (lastTime) accumulator += Math.min((timestamp - lastTime) / 1000, 0.1) * Number(speed.value);
+        const controls = town.fireEngine?.active ? fireControls.read() : null;
+        const widthFactor = Number(width.value) / 100;
         while (accumulator >= 0.1) {
-            renderer.captureMotion(town);
-            if (town.fireEngine?.active) updateFireEngine(town, 0.1, fireControls.read(), Number(width.value) / 100);
+            // Only the last completed step is interpolated on this frame. At
+            // high pace, avoid copying every vehicle for the intermediate steps.
+            if (accumulator - 0.1 < 0.1) renderer.captureMotion(town);
+            if (town.fireEngine?.active) updateFireEngine(town, 0.1, controls, widthFactor);
             updateRealTown(town, 0.1); accumulator -= 0.1;
         }
         lastTime = timestamp;
@@ -530,22 +534,29 @@ function followBus() {
 function updateFireDashboard() {
     const engine = town?.fireEngine;
     if (!engine?.active) return;
-    $('fire-speed').textContent = `${engine.speed < -0.1 ? 'R · ' : ''}${Math.round(Math.abs(engine.speed) * 2.23694)} mph`;
-    $('fire-road').textContent = engine.road?.tags.name || 'Village lane';
+    // The driving HUD is visited every animation frame. Replacing unchanged
+    // text/attributes needlessly invalidates browser layout and live regions.
+    const setText = (element, value) => { if (element.textContent !== value) element.textContent = value; };
+    const setPressed = (element, value) => {
+        const pressed = String(value);
+        if (element.getAttribute('aria-pressed') !== pressed) element.setAttribute('aria-pressed', pressed);
+    };
+    setText($('fire-speed'), `${engine.speed < -0.1 ? 'R · ' : ''}${Math.round(Math.abs(engine.speed) * 2.23694)} mph`);
+    setText($('fire-road'), engine.road?.tags.name || 'Village lane');
     const blocked = engine.blocked;
     const bumped = engine.bumpTime !== undefined && engine.time - engine.bumpTime < 1.5;
     const wallBounce = engine.wallBounceTime !== undefined && engine.time - engine.wallBounceTime < 0.8;
-    $('fire-driving-status').textContent = paused ? 'Paused — take a breather.' : blocked ? String(blocked) :
+    setText($('fire-driving-status'), paused ? 'Paused — take a breather.' : blocked ? String(blocked) :
         wallBounce ? 'Bump! Keep steering — you can slide away.' : bumped ? 'A little nudge — making room!' :
-        engine.siren ? 'Nee naw! Cars are making room.' : 'Siren off. The village carries on.';
-    $('fire-siren').querySelector('.fire-action-copy').textContent = engine.siren ? 'Nee naw on' : 'Nee naw off';
-    $('fire-siren').setAttribute('aria-pressed', String(engine.siren));
-    $('fire-sound').querySelector('.fire-action-copy').textContent = fireAudio.supported ? fireMuted ? 'Sound off' : 'Sound on' : 'Sound unavailable';
-    $('fire-sound').setAttribute('aria-pressed', String(!fireMuted && fireAudio.supported));
-    $('fire-sound').disabled = !fireAudio.supported;
+        engine.siren ? 'Nee naw! Cars are making room.' : 'Siren off. The village carries on.');
+    setText($('fire-siren').querySelector('.fire-action-copy'), engine.siren ? 'Nee naw on' : 'Nee naw off');
+    setPressed($('fire-siren'), engine.siren);
+    setText($('fire-sound').querySelector('.fire-action-copy'), fireAudio.supported ? fireMuted ? 'Sound off' : 'Sound on' : 'Sound unavailable');
+    setPressed($('fire-sound'), !fireMuted && fireAudio.supported);
+    if ($('fire-sound').disabled !== !fireAudio.supported) $('fire-sound').disabled = !fireAudio.supported;
     $('fire-engine-hud').classList.toggle('siren-off', !engine.siren);
     $('fire-engine-hud').classList.toggle('has-blockage', Boolean(blocked || paused || bumped));
-    $('fire-pace').value = speed.value;
+    if ($('fire-pace').value !== speed.value) $('fire-pace').value = speed.value;
     fireAudio.update({ active: !paused && !document.hidden, enabled: engine.siren && !fireMuted,
         time: performance.now() / 1000 });
 }

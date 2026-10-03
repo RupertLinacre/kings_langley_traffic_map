@@ -735,6 +735,7 @@ export class Simulation {
     occupied = this.occupancy();
     this.cooperative.update(dt, occupied);
     occupied = this.occupancy();
+    this.emergency.beginMotionQueries();
     this.reserve(occupied);
     const updates = [];
     for (const c of this.cars) {
@@ -834,6 +835,7 @@ export class Simulation {
       });
     }
     // Commit only after every acceleration has been computed from the same snapshot.
+    this.emergency.endMotionQueries();
     const finished = new Set();
     for (const { c, move, v, desired } of updates) {
       c.q += move;
