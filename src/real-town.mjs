@@ -8,7 +8,8 @@ import { createCanalBoats } from './canal-boats.mjs';
 import { turnaroundPose, turnaroundFits, preferredRoadCost } from './kings-langley/engine/adaptive-traffic.mjs';
 import { updateVillageVisits } from './village-visits.mjs';
 import { attachBusServices, setBusTraffic, updateBusServices } from './real-buses.mjs';
-import { attachStationVisits, resetStationTraffic, updateStationVisits, stationVehiclePose } from './station-visits.mjs';
+import { attachStationVisits, resetStationTraffic, updateStationVisits, stationVehiclePose,
+    stationTrafficLimit, stationSpawnAllowed, stationReservedBodies } from './station-visits.mjs';
 import { attachVillageDay, updateVillageDay } from './village-day.mjs';
 import { attachPurposefulJourneys, updatePurposefulJourneys, resetPurposefulJourneys } from './purposeful-journeys.mjs';
 import { fireEngineObstacles, bodyOnPavedSurface } from './fire-engine.mjs';
@@ -146,8 +147,9 @@ export function createRealTown(map, demand, seed, { cyclists = 24, pedestrians =
     });
     simulation.emergency.setObstacleProvider(() => fireEngineObstacles(town, town.walking.widthFactor));
     simulation.emergency.setSurfaceProvider(body => bodyOnPavedSurface(town, body, town.walking.widthFactor, { road: body.road }));
-    simulation.crossingStop = (car, edge) => pedestrianTrafficLimit(town, car, edge);
-    simulation.crossingSpawnAllowed = car => pedestrianSpawnAllowed(town, car) && simulation.adaptive.spawnAllowed(car) &&
+    simulation.stationReservedBodies = () => stationReservedBodies(town);
+    simulation.crossingStop = (car, edge) => Math.min(pedestrianTrafficLimit(town, car, edge), stationTrafficLimit(town, car, edge));
+    simulation.crossingSpawnAllowed = car => pedestrianSpawnAllowed(town, car) && stationSpawnAllowed(town, car) && simulation.adaptive.spawnAllowed(car) &&
         simulation.busOvertaking.spawnAllowed(car) && simulation.parking.spawnAllowed(car) && simulation.emergency.spawnAllowed(car) &&
         (simulation.cooperative?.spawnAllowed(car) ?? true);
     simulation.turnaroundAllowed = (car, edge, d, radius) =>

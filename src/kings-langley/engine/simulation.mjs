@@ -1,5 +1,5 @@
 import { Closures } from './closures.mjs';
-import { movementsCompatible } from './junction-movements.mjs';
+import { movementsCompatible, renderedMovementsCompatible } from './junction-movements.mjs';
 import { AdaptiveTraffic } from './adaptive-traffic.mjs';
 import { BusOvertaking } from './bus-overtaking.mjs';
 import { EmergencyTraffic } from './emergency-traffic.mjs';
@@ -130,6 +130,7 @@ export class Simulation {
     this.adaptive = new AdaptiveTraffic(this);
     this.busOvertaking = new BusOvertaking(this);
     this.emergency = new EmergencyTraffic(this);
+    this.junctionBodyShapes = new Map();
     this.cooperative = new CooperativeManoeuvres(this);
     this.routes = this.routeSpecs.map((r) => r.path);
     this.totalRate = this.routeSpecs.reduce((sum, r) => sum + r.rate, 0);
@@ -319,7 +320,8 @@ export class Simulation {
     );
   }
   compatible(a, b) {
-    return movementsCompatible(this.data, a, b, this.junctionShapes, this.junctionCompatibility);
+    return movementsCompatible(this.data, a, b, this.junctionShapes, this.junctionCompatibility) &&
+      renderedMovementsCompatible(this, a, b, this.junctionBodyShapes);
   }
   priority(edge, next) {
     const ranks = {
@@ -375,6 +377,7 @@ export class Simulation {
           // pedestrian crossing, red light or blocked exit before the junction.
           (r.car.q >= r.crossing ||
             (plannedStop(r.car) > r.crossing && !hasLeader(r.car, r.crossing) &&
+              claims.every(other => other === r || other.car.q < other.crossing || this.compatible(r, other)) &&
               entryClearance(r.car) >= r.crossing - r.car.q + (r.circulating ? 0 : r.car.length) + r.car.minGap + 0.5)),
       );
       if (alive.length) this.reservations.set(node, alive);
@@ -714,6 +717,7 @@ export class Simulation {
       throw Error('Use a fixed timestep no greater than 0.2 s');
     if (!(multiplier >= 0 && multiplier <= 4))
       throw Error('Demand multiplier must be 0–4');
+    this.junctionBodyShapes.clear();
     this.emergency.update(dt);
     this.closures.updateCars();
     this.adaptive.update(dt);

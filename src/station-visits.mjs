@@ -258,6 +258,7 @@ function arriveEvent(town, trip, time) {
 
 function tryMerge(town, trip) {
     const sim = town.simulation, car = trip.car;
+    if (stationManoeuvreBusy(town, trip)) return false;
     if (!trip.outboundPrepared) {
         // Let anybody using the little forecourt walkway clear the turning
         // envelope before changing the car's orientation inside its bay.
@@ -311,10 +312,11 @@ function maintainTrips(town, dt) {
         if (car.parked?.station) car.roadStop.remaining = HOLD;
         if (trip.phase === 'approaching' && car.roadStop.remaining !== null) {
             const occupied = new Set(state.trips.filter(other => other !== trip && other.car && other.bay).map(other => other.bay.id));
-            const bay = state.area.bays.find(item => !occupied.has(item.id));
             car.roadStop.remaining = HOLD;
+            if (stationManoeuvreBusy(town, trip)) continue;
+            const bay = [...state.area.bays].reverse().find(item => !occupied.has(item.id) &&
+                !stationMovementBlocked(town, trip, 0, TURN_SECONDS, { phase: 'pulling-in', bay: item }));
             if (!bay) continue;
-            if (stationMovementBlocked(town, trip, 0, TURN_SECONDS, { phase: 'pulling-in', bay })) continue;
             trip.bay = bay; trip.passengerBay = bay; trip.phase = 'pulling-in'; trip.elapsed = 0;
         } else if (trip.phase === 'pulling-in' && trip.elapsed >= TURN_SECONDS) {
             car.parked = { station: true, slot: trip.bay.id };
@@ -399,9 +401,109 @@ function normalRoadPose(town, car, widthFactor) {
 
 // Station bay motion runs before Simulation.step, so its elapsed-time path
 // needs the same current-body and promised-recovery veto as road motion.
+function stationManoeuvreBusy(town, trip) {
+    return town.stationVisits.trips.some(other => other !== trip && other.car &&
+        (enteredForecourt(town, other) || ['pulling-in', 'pulling-out', 'turning-in-bay'].includes(other.phase) || clearingForecourt(town, other)));
+}
+
+function enteredForecourt(town, trip) {
+    if (trip.phase !== 'approaching') return false;
+    const index = trip.car.route.indexOf(town.stationVisits.area.inbound.id);
+    return index >= 0 && trip.car.q > trip.car.offsets[index];
+}
+
+function clearingForecourt(town, trip) {
+    return trip.phase === 'leaving' && trip.car?.q - trip.car.length < town.stationVisits.area.outbound.length + 12;
+}
+
+function stationBody(town, trip, elapsed) {
+    const sample = { ...trip, elapsed, previousElapsed: elapsed, previousPhase: trip.phase };
+    const p = stationVehiclePose(town, { ...trip.car, stationVisit: sample }, town.walking?.widthFactor || 2.5, 1);
+    if (!p) return null;
+    const factor = Math.min((town.walking?.widthFactor || 2.5) * p.road.size, p.road.widthCap || Infinity);
+    return { ...p, length: trip.car.length, width: trip.car.width * factor, layer: p.road.layer,
+        ownerId: trip.car.id, kind: 'station manoeuvre' };
+}
+
+/** Temporary full-body sweep; parked train waiters reserve no future merge.
+ * The departing road leg stays protected until its rear clears the forecourt. */
+export function stationReservedBodies(town) {
+    const state = town.stationVisits;
+    if (!state?.area) return [];
+    const key = `${town.simulation.time}:${town.walking?.widthFactor}:` + state.trips.filter(trip => trip.car)
+        .map(trip => `${trip.car.id},${trip.phase},${trip.elapsed},${trip.car.q},${trip.bay?.id}`).join(';');
+    if (state.reservationCache?.key === key) return state.reservationCache.bodies;
+    const bodies = [];
+    for (const trip of state.trips) {
+        if (!trip.car) continue;
+        if (['pulling-in', 'turning-in-bay', 'pulling-out'].includes(trip.phase)) {
+            for (let elapsed = trip.elapsed; elapsed <= TURN_SECONDS + 0.001; elapsed += 0.03) {
+                const body = stationBody(town, trip, Math.min(TURN_SECONDS, elapsed));
+                if (body) bodies.push(body);
+            }
+        } else if (clearingForecourt(town, trip)) {
+            const end = Math.min(trip.car.offsets.at(-1), state.area.outbound.length + trip.car.length + 12);
+            for (let q = trip.car.q; q <= end + 0.001; q += 0.5)
+                bodies.push({ ...town.simulation.emergency.body(trip.car, q), kind: 'station departure' });
+        }
+    }
+    state.reservationCache = { key, bodies };
+    return bodies;
+}
+
+function stationTrafficBodies(town, car) {
+    return [...stationReservedBodies(town), ...town.stationVisits.trips.filter(trip => trip.car?.parked?.station)
+        .map(trip => town.simulation.emergency.body(trip.car))].filter(body => body.ownerId !== car.id);
+}
+
+/** Edge-local front stop for ordinary road motion near the small forecourt. */
+export function stationTrafficLimit(town, car, edge) {
+    if (!town.stationVisits?.area || ![233961900, 233961901].includes(edge.way)) return Infinity;
+    // The bent forecourt is a short shared entrance, not two independent
+    // straight lanes. A front may enter only after the previous actual
+    // arrival/departure clears; parked train waiters own only their bay body.
+    if (edge.id === town.stationVisits.area.inbound.id) {
+        const index = car.route.indexOf(edge.id);
+        if (index >= 0 && car.q <= car.offsets[index]) {
+            const occupied = new Set(town.stationVisits.trips.filter(trip => trip.car && trip.bay).map(trip => trip.bay.id));
+            if (!town.stationVisits.area.bays.some(bay => !occupied.has(bay.id))) return 0;
+            if (town.stationVisits.trips.some(trip => trip.car && trip.car !== car && (enteredForecourt(town, trip) ||
+                ['pulling-in', 'turning-in-bay', 'pulling-out'].includes(trip.phase) || clearingForecourt(town, trip)))) return 0;
+        }
+    }
+    const bodies = stationTrafficBodies(town, car);
+    if (!bodies.length) return Infinity;
+    for (let index = car.index; index < car.route.length; index++) {
+        if (car.route[index] !== edge.id) continue;
+        const start = Math.max(0, car.q - car.offsets[index]), end = Math.min(edge.length, start + 55);
+        for (let d = start; d <= end + 0.001; d += 0.25) {
+            const candidate = town.simulation.emergency.body(car, car.offsets[index] + d);
+            if (bodies.some(body => orientedBodiesOverlap(candidate, body, 0.3))) {
+                // Hold a new approach before its short forecourt junction,
+                // rather than admitting its front and leaving its tail in
+                // the exit that the current departure needs to clear.
+                return edge.id === town.stationVisits.area.inbound.id && car.q <= car.offsets[index]
+                    ? 0 : Math.max(0, d - 0.25);
+            }
+        }
+        return Infinity;
+    }
+    return Infinity;
+}
+
+/** Reject births inside an occupied bay sweep or its short road departure. */
+export function stationSpawnAllowed(town, car) {
+    if (!town.stationVisits?.area) return true;
+    const body = town.simulation.emergency.body(car);
+    return !stationTrafficBodies(town, car).some(other => orientedBodiesOverlap(body, other, 0.3));
+}
+
 function stationMovementBlocked(town, trip, from, to, changes = {}) {
-    if (!trip.car || !hasPedestrianTrafficBodies(town)) return false;
-    const blockers = pedestrianTrafficBodies(town).filter(body => body.ownerId !== trip.car.id);
+    if (!trip.car) return false;
+    const blockers = [...pedestrianTrafficBodies(town),
+        ...(town.simulation.emergency.obstacleProvider?.() || []).filter(body => body.kind === 'pedestrian'),
+        ...town.simulation.cars.filter(car => car !== trip.car).map(car => town.simulation.emergency.body(car))]
+        .filter(body => body.ownerId !== trip.car.id);
     if (!blockers.length) return false;
     const widthFactor = town.walking?.widthFactor || 2.5;
     // Keep increments under 0.03 s, including a complete pi-radian bay turn.
@@ -428,13 +530,35 @@ export function stationVehiclePose(town, car, widthFactor = 1, alpha = 1) {
     const base = normalRoadPose(town, car, widthFactor), bay = trip.bay;
     const elapsed = trip.previousPhase === trip.phase ? (trip.previousElapsed ?? trip.elapsed) +
         (trip.elapsed - (trip.previousElapsed ?? trip.elapsed)) * clamp(alpha) : trip.elapsed;
-    let t = trip.phase === 'pulling-in' ? smooth(elapsed / TURN_SECONDS) :
+    const t = trip.phase === 'pulling-in' ? smooth(elapsed / TURN_SECONDS) :
         trip.phase === 'pulling-out' ? 1 - smooth(elapsed / TURN_SECONDS) : 1;
     const parkedAngle = trip.outboundPrepared ? bay.angle + Math.PI *
         (trip.phase === 'turning-in-bay' ? smooth(elapsed / TURN_SECONDS) : 1) : bay.angle;
-    const delta = Math.atan2(Math.sin(parkedAngle - base.angle), Math.cos(parkedAngle - base.angle));
-    return { ...base, x: base.x + (bay.x - base.x) * t, y: base.y + (bay.y - base.y) * t,
-        angle: base.angle + delta * t, parked: car.parked?.station || false, station: true };
+    let p = { x: bay.x, y: bay.y, angle: parkedAngle };
+    if (trip.phase === 'turning-in-bay') {
+        // Make room for the long illustrated body during its turn. Moving
+        // into the west aisle keeps the complete hull within the forecourt,
+        // clear of the eastern passenger path and the main-line railway.
+        const angle = parkedAngle - bay.angle;
+        const factor = Math.min(widthFactor * base.road.size, base.road.widthCap || Infinity);
+        const extent = Math.abs(Math.sin(angle)) * car.length / 2 + Math.abs(Math.cos(angle)) * car.width * factor / 2;
+        const shift = Math.max(0, extent - 2.3);
+        p.x += Math.sin(bay.angle) * shift;
+        p.y -= Math.cos(bay.angle) * shift;
+    }
+    if (['pulling-in', 'pulling-out'].includes(trip.phase)) {
+        // The real road reaches the west side of this illustrative forecourt.
+        // Use its clear aisle before the short lateral bay connector; a direct
+        // diagonal from a remote bay would sweep through other parked cars.
+        const first = town.stationVisits.area.bays[0];
+        const aisle = item => ({ x: item.x + Math.sin(item.angle) * 6.5,
+            y: item.y - Math.cos(item.angle) * 6.5, angle: parkedAngle });
+        const points = [{ ...base }, aisle(first), aisle(bay), { ...bay, angle: parkedAngle }]
+            .filter((point, i, all) => !i || Math.hypot(point.x - all[i - 1].x, point.y - all[i - 1].y) > 0.01);
+        const path = measure(points);
+        p = pathPoint(path, t * path.length);
+    }
+    return { ...base, ...p, parked: car.parked?.station || false, station: true };
 }
 
 /** Pose for linked passengers; visible=false inside the grade-separated

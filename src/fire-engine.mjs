@@ -2,7 +2,7 @@ import { position } from './kings-langley/engine/graph.mjs';
 import { laneOffset } from './kings-langley/engine/traffic-model.mjs';
 import { pedestrianPose } from './real-pedestrians.mjs';
 import { groupPose } from './purposeful-journeys.mjs';
-import { stationPassengerPose } from './station-visits.mjs';
+import { stationPassengerPose, stationReservedBodies } from './station-visits.mjs';
 import { pathPoint } from './street-geometry.mjs';
 import { orientedBodiesOverlap } from './body-geometry.mjs';
 import { fireStationGeometry, fireStationContainsPoint } from './fire-station.mjs';
@@ -240,6 +240,7 @@ export function fireEngineObstacles(town, widthFactor = town.walking?.widthFacto
     // the obstacle provider recursively. A new player manoeuvre must respect
     // the space an ordinary driver has already promised to reverse/merge into.
     result.push(...(sim.cooperative?.reservedBodies?.() || []));
+    result.push(...stationReservedBodies(town));
     return result;
 }
 function carBody(town, car, size) {

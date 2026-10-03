@@ -9,6 +9,7 @@ const TAU = Math.PI * 2;
 const HALF_CROSSING = 3.5;
 const GAP_MARGIN = 1.4;
 const WAIT_BEFORE_CENTRE = 2;
+const MIDDLE_WAIT_BEFORE_RETREAT = 18;
 const GAP_ROADS = new Set(['tertiary', 'residential', 'unclassified', 'living_street']);
 const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
 const pavement = (road, width) => road.baseWidth * Math.min(width * road.size, road.widthCap || Infinity) / 2 + 1.5;
@@ -64,7 +65,9 @@ function connector(link, width, t) {
         y: q * q * a.y + 2 * q * t * control.y + t * t * b.y, angle: Math.atan2(dy, dx), road: a.road, layer: a.layer };
 }
 function linkPoint(link, progress, width) {
-    const t = clamp(progress, 0, 1);
+    // A gap walker may step a little beyond the starting kerb when retreating
+    // so their complete walking artwork clears the nearest traffic lane.
+    const t = link.crossing?.kind === 'gap' ? Math.min(1, progress) : clamp(progress, 0, 1);
     if (link.type === 'walk') {
         const p = curbPoint(link.from.section, link.from.side, link.from.distance + (link.to.distance - link.from.distance) * t, width);
         if (link.to.distance < link.from.distance) p.angle += Math.PI;
@@ -81,6 +84,7 @@ function linkPoint(link, progress, width) {
 export function pedestrianTrafficBodies(town) {
     const sim = town.simulation, bodies = [];
     if (town.fireEngine?.active && town.fireEngine.pose) bodies.push(town.fireEngine.pose);
+    bodies.push(...(sim?.stationReservedBodies?.() || []));
     for (const controller of [sim?.cooperative, sim?.emergency]) {
         if (!controller) continue;
         if (controller.blockingBodies) { bodies.push(...controller.blockingBodies()); continue; }
@@ -96,7 +100,8 @@ export function pedestrianTrafficBodies(town) {
     return bodies;
 }
 export function hasPedestrianTrafficBodies(town) {
-    return Boolean(town.fireEngine?.active || town.simulation?.cooperative?.states?.size || town.simulation?.emergency?.states?.size);
+    return Boolean(town.fireEngine?.active || town.simulation?.cooperative?.states?.size || town.simulation?.emergency?.states?.size ||
+        town.simulation?.stationReservedBodies?.().length);
 }
 
 /** Test a short pedestrian sweep against the current player and displaced
@@ -105,8 +110,18 @@ export function hasPedestrianTrafficBodies(town) {
 export function pedestrianMotionBlocked(town, from, to, { length = 2.6, width = 2.1, blockers = pedestrianTrafficBodies(town) } = {}) {
     if (!blockers.length || to?.visible === false || !to || ![to.x, to.y].every(Number.isFinite)) return false;
     const start = from?.visible === false || !from ? to : from;
-    const relevant = blockers.filter(body => (body.layer ?? body.road?.layer ?? 0) === (to.layer ?? 0) &&
-        [body.x, body.y, body.length, body.width].every(Number.isFinite));
+    const padding = Math.hypot(length, width) / 2 + 0.25;
+    const minX = Math.min(start.x, to.x) - padding, maxX = Math.max(start.x, to.x) + padding;
+    const minY = Math.min(start.y, to.y) - padding, maxY = Math.max(start.y, to.y) + padding;
+    const relevant = blockers.filter(body => {
+        if ((body.layer ?? body.road?.layer ?? 0) !== (to.layer ?? 0) ||
+            ![body.x, body.y, body.length, body.width].every(Number.isFinite)) return false;
+        // Bay reservations contain many small swept hulls. Reject distant
+        // bodies by their enclosing circle before the exact oriented test;
+        // a station manoeuvre must not make every village walk expensive.
+        const radius = Math.hypot(body.length, body.width) / 2;
+        return body.x + radius >= minX && body.x - radius <= maxX && body.y + radius >= minY && body.y - radius <= maxY;
+    });
     if (!relevant.length) return false;
     const distance = Math.hypot(to.x - start.x, to.y - start.y);
     const count = Math.max(1, Math.ceil(distance / 0.4));
@@ -340,8 +355,9 @@ function distanceToCrossing(car, crossing, edgeId) {
 function requestCrossing(town, person, crossing) {
     if (crossing.kind === 'gap') {
         crossing.users.add(person); person.crossing = crossing; person.crossingLane = null;
-        person.crossingLanes = new Set(); person.gapStage = 'near';
-        person.state = 'gap_wait'; person.activity = 'Looking both ways for a gap';
+        person.crossingLanes = new Set(); person.gapStage = 'near'; person.gapMiddleWait = 0;
+        person.state = 'gap_wait'; person.activity = person.gapRetryBoth
+            ? 'Back on the pavement — waiting for a gap in both lanes' : 'Looking both ways for a gap';
         return;
     }
     if (!crossing.users.size) {
@@ -369,6 +385,10 @@ function gapGeometry(link, width) {
     const factor = Math.min(width * road.size, road.widthCap || Infinity);
     return {
         curb, length: curb * 2, waitProgress: (curb - WAIT_BEFORE_CENTRE) / (curb * 2),
+        // A retreat finishes beyond the largest bus's outer flank, including
+        // the visible walking feet. The lane stays held until this whole body
+        // is on the pavement, even at the narrowest illustrated road width.
+        retreatProgress: -Math.max(0, 2.8 * factor + 3.1 - curb) / (curb * 2),
         // The largest normal body is a 2.5m bus. Include the walking sprite's
         // trailing feet (2.675m) and a little clearance before releasing cars.
         nearClearProgress: (curb + Math.max(0, 3.1 - (1.55 - 2.5 / 2) * factor)) / (curb * 2),
@@ -415,10 +435,11 @@ function advanceGapCrossing(town, person, link, remaining) {
     const [near, far] = laneEdges(link), crossing = link.crossing;
     const geometry = gapGeometry(link, town.walking.widthFactor);
     if (person.state === 'gap_wait') {
-        const first = gapInLane(town, crossing, near, person, geometry.curb - WAIT_BEFORE_CENTRE);
-        const second = gapInLane(town, crossing, far, person, geometry.length);
+        const extra = -Math.min(0, person.progress) * geometry.length;
+        const first = gapInLane(town, crossing, near, person, geometry.curb - WAIT_BEFORE_CENTRE + extra);
+        const second = gapInLane(town, crossing, far, person, geometry.length + extra);
         person.gapChecks = { nearClear: first.clear, farClear: second.clear, queued: first.queued };
-        if (!first.clear) return { remaining: 0, complete: false };
+        if (!first.clear || person.gapRetryBoth && !second.clear) return { remaining: 0, complete: false };
         occupyLane(person, near); person.state = 'gap_crossing';
         person.activity = first.queued ? 'Walking through a gap in the queue' : 'Crossing in a gap between vehicles';
     }
@@ -426,24 +447,44 @@ function advanceGapCrossing(town, person, link, remaining) {
         // Remain inside the held near lane, clear of a passing bus's swept body.
         // Recompute the stop point if the user changes the illustrated width.
         person.progress = geometry.waitProgress;
-        if (!gapInLane(town, crossing, far, person, geometry.curb + WAIT_BEFORE_CENTRE).clear) return { remaining: 0, complete: false };
-        occupyLane(person, far); person.gapStage = 'far'; person.state = 'gap_crossing'; person.activity = 'The other lane is clear — crossing';
+        if (!gapInLane(town, crossing, far, person, geometry.curb + WAIT_BEFORE_CENTRE).clear) {
+            person.gapMiddleWait = (person.gapMiddleWait || 0) + remaining;
+            if (person.gapMiddleWait < MIDDLE_WAIT_BEFORE_RETREAT) return { remaining: 0, complete: false };
+            // A continuous stream in the other lane can otherwise strand this
+            // person indefinitely, backing traffic through nearby junctions.
+            // Walk back through the still-reserved near lane, then try again
+            // from the pavement only when both halves offer a genuine gap.
+            person.gapStage = 'retreat'; person.gapRetryBoth = true;
+            person.state = 'gap_retreating'; person.activity = 'The other lane is busy — stepping back to the pavement';
+        } else {
+            occupyLane(person, far); person.gapStage = 'far'; person.state = 'gap_crossing'; person.activity = 'The other lane is clear — crossing';
+        }
     }
-    const target = person.gapStage === 'near' ? geometry.waitProgress : 1;
-    const required = Math.max(0, target - person.progress) * geometry.length / person.speed;
-    const nextProgress = Math.min(target, person.progress + remaining * person.speed / geometry.length);
+    const retreating = person.gapStage === 'retreat';
+    const target = retreating ? geometry.retreatProgress : person.gapStage === 'near' ? geometry.waitProgress : 1;
+    const direction = retreating ? -1 : 1;
+    const required = Math.abs(target - person.progress) * geometry.length / person.speed;
+    const advance = person.progress + direction * remaining * person.speed / geometry.length;
+    const nextProgress = retreating ? Math.max(target, advance) : Math.min(target, advance);
     if (blockedProgress(town, person, link, nextProgress)) return { remaining: 0, complete: false };
     if (remaining < required) {
-        person.progress += remaining * person.speed / geometry.length;
+        person.progress = advance;
         if (person.gapStage === 'far' && person.progress >= geometry.nearClearProgress) releaseLane(person, near);
         return { remaining: 0, complete: false };
     }
     person.progress = target; remaining -= required;
     if (person.gapStage === 'near') {
-        person.state = 'gap_middle_wait'; person.activity = 'Waiting for the other lane to clear';
+        person.state = 'gap_middle_wait'; person.gapMiddleWait = 0; person.activity = 'Waiting for the other lane to clear';
         return { remaining, complete: false };
     }
+    if (retreating) {
+        releaseLane(person); crossing.users.delete(person);
+        person.crossing = null; person.crossingLane = null;
+        person.state = 'gap_wait'; person.activity = 'Back on the pavement — waiting for a gap in both lanes';
+        return { remaining: 0, complete: false };
+    }
     releaseLane(person);
+    person.gapRetryBoth = false; person.gapMiddleWait = 0;
     return { remaining, complete: true };
 }
 function canEnter(town, crossing) {
@@ -533,7 +574,9 @@ export function pedestrianPose(town, person, widthFactor = 2.5) {
     const link = person.route?.[person.index];
     const progress = person.state === 'gap_middle_wait' && link?.crossing?.kind === 'gap'
         ? gapGeometry(link, widthFactor).waitProgress : person.progress;
-    return link ? linkPoint(link, progress, widthFactor) : nodePoint(person.node, widthFactor);
+    const pose = link ? linkPoint(link, progress, widthFactor) : nodePoint(person.node, widthFactor);
+    if (person.state === 'gap_retreating') pose.angle += Math.PI;
+    return pose;
 }
 
 /** A waypoint on an existing permitted pavement, clamped before its junction

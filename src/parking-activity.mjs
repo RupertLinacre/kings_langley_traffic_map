@@ -498,6 +498,23 @@ export class ParkingActivity {
     const target = car.parkingSearch?.target;
     return target && target.q - car.q < 30 ? Math.sign(target.p.lateral * target.direction) || 1 : 0;
   }
+  drainingContinuation(passage, car) {
+    const root = passage.zone;
+    if (!root.reconfiguring) return false;
+    // A layout transaction waits for its old row's bodies to leave. It must
+    // still let an entered owner clear a second section of that same row;
+    // stopping that owner between sections prevents the transaction draining.
+    const entered = (root.sections || []).some(section => {
+      const claim = section.claims.get(car.id);
+      return claim && claim.direction === passage.direction && claim.entry < passage.entry &&
+        car.q > claim.entry && car.q - car.length <= claim.exit + 2;
+    });
+    if (!entered) return false;
+    // Turning away and returning later is a new visit, not a continuation.
+    for (let i = car.index; i < car.route.length && car.offsets[i] < passage.entry; i++)
+      if (this.sim.data.edges[car.route[i]].tags.name !== root.name) return false;
+    return true;
+  }
   preferredDirection(section) {
     const root = section.rootZone;
     if (!root?.localObservation) return 0;

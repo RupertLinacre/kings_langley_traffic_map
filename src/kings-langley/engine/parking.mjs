@@ -380,10 +380,14 @@ export class Parking {
       }
       const preferred = this.activity.preferredDirection(zone);
       if (preferred && !zone.claims.size && zone.direction !== preferred) this.beginGroup(zone, preferred);
+      const draining = requests.find(r => this.activity.drainingContinuation(r, r.car));
+      if (draining && !zone.claims.size && (!preferred || preferred === draining.direction) &&
+          zone.direction !== draining.direction) this.beginGroup(zone, draining.direction);
       for (const r of requests.sort(
         (a, b) => a.entry - a.car.q - (b.entry - b.car.q),
       )) {
-        if (zone.rootZone?.reconfiguring) continue;
+        const continuation = this.activity.drainingContinuation(r, r.car);
+        if (zone.rootZone?.reconfiguring && !continuation) continue;
         if (r.direction !== zone.direction)
           continue;
         if ([...zone.claims.values()].some((x) => x.direction !== r.direction))
@@ -403,7 +407,7 @@ export class Parking {
         );
         if (downstream.gap < r.car.length + 4) continue;
         if (requests.some(x => x.direction !== zone.direction) &&
-            (zone.batch >= zone.batchLimit || yieldNow && zone.direction === yieldingDirection)) continue;
+            (zone.batch >= zone.batchLimit || yieldNow && zone.direction === yieldingDirection) && !continuation) continue;
         zone.claims.set(r.car.id, { ...r, grantedAt: s.time });
         zone.batch++;
       }

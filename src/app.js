@@ -353,7 +353,8 @@ function updateOtherSelection(alpha) {
         p = pedestrianPose(town, person, Number(width.value) / 100);
         title = 'A village wanderer'; description = p.road.tags.name || 'Along a village pavement';
         story = person.trafficWaiting ? 'Waiting for a vehicle to clear the path.' : person.activity || 'Off for a little walk around the village.';
-        status = person.trafficWaiting ? 'Waiting for a clear path' : person.state.includes('wait') ? 'Looking and waiting' : person.pause ? 'A little rest' : 'One step at a time';
+        status = person.trafficWaiting ? 'Waiting for a clear path' : person.state === 'gap_retreating' ? 'Stepping back to the pavement' :
+            person.state.includes('wait') ? 'Looking and waiting' : person.pause ? 'A little rest' : 'One step at a time';
     } else if (target.kind === 'family') {
         const group = town.purposefulJourneys?.groups.find(group => group.id === target.id);
         p = group && groupPose(town, group, Number(width.value) / 100, paused ? 1 : alpha);
@@ -362,6 +363,7 @@ function updateOtherSelection(alpha) {
         description = group.trip?.school?.name || 'A purposeful village walk';
         story = group.activity || 'Walking together, from the car to the school gates.';
         status = group.walker?.trafficWaiting ? 'Waiting together for a clear path' :
+            group.walker?.state === 'gap_retreating' ? 'Stepping back together' :
             group.walker?.state?.includes('wait') ? 'Waiting together for a safe crossing' : 'A little walk together';
     } else if (target.kind === 'passenger') {
         const person = town.stationVisits?.passengers.find(person => person.id === target.id);
