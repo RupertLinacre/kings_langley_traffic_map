@@ -330,7 +330,7 @@ export function groupPose(town, group, widthFactor = 2.5, alpha = 1) {
     const direction = pathPoint(section.path, distance).angle;
     return { ...p, x: p.x + Math.sin(direction) * side * extra, y: p.y - Math.cos(direction) * side * extra,
         visible: true, moving: ['outbound', 'returning'].includes(group.state) &&
-            !person.fireEngineWaiting && !['crossing_wait', 'gap_wait', 'gap_middle_wait'].includes(person.state), group, layer: p.layer || 0 };
+            !person.trafficWaiting && !person.fireEngineWaiting && !['crossing_wait', 'gap_wait', 'gap_middle_wait'].includes(person.state), group, layer: p.layer || 0 };
 }
 export const purposefulJourneyPose = groupPose;
 

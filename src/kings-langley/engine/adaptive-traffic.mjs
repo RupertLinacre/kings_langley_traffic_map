@@ -83,7 +83,7 @@ export class AdaptiveTraffic {
     }, 0);
   }
   hasCommitment(car) {
-    return car.parked || car.parkingActivity || car.purposefulJourney || car.turnaround || car.busPass || (car.roadStop && !car.roadStop.done) ||
+    return car.parked || car.parkingActivity || car.purposefulJourney || car.turnaround || car.busPass || car.cooperativeManoeuvre || (car.roadStop && !car.roadStop.done) ||
       (this.reviewCommitments ? this.reviewCommitments.has(car.id) :
       this.sim.parking.zones.some(zone => zone.claims.has(car.id)) ||
       [...this.sim.reservations.values()].some(claims => claims.some(r => r.car === car && r.crossing > car.q)));

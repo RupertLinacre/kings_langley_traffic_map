@@ -2,7 +2,7 @@ import { findRoute, position } from './kings-langley/engine/graph.mjs';
 import { laneOffset } from './kings-langley/engine/traffic-model.mjs';
 import { trackPoint, trainTiming, trainStationSchedule } from './railway.mjs';
 import { measure, pathPoint } from './street-geometry.mjs';
-import { pedestrianMotionBlocked } from './real-pedestrians.mjs';
+import { pedestrianMotionBlocked, pedestrianTrafficBodies, hasPedestrianTrafficBodies } from './real-pedestrians.mjs';
 import { orientedBodiesOverlap } from './body-geometry.mjs';
 
 const HOLD = 86400;
@@ -197,12 +197,14 @@ function platformWalk(state, trip) {
 
 function advancePassengers(town, dt, schedule) {
     const state = town.stationVisits, time = town.simulation.time;
+    const blockers = hasPedestrianTrafficBodies(town) ? pedestrianTrafficBodies(town) : [];
     for (const person of state.passengers) {
         const trip = person.trip;
         person.previousElapsed = person.elapsed; person.previousProgress = person.progress; person.previousPhase = person.phase;
         const walk = platformWalk(state, trip);
         person.fireEngineWaiting = false;
-        if (town.fireEngine?.active) {
+        person.trafficWaiting = false;
+        if (blockers.length) {
             const candidate = { ...person, elapsed: person.elapsed + dt, previousPhase: null };
             if (['walking-platform', 'walking-car'].includes(person.phase))
                 candidate.progress = clamp(person.progress + person.speed * dt / Math.max(1, walk.length));
@@ -212,8 +214,9 @@ function advancePassengers(town, dt, schedule) {
             if (person.phase === 'waiting-car' && trip.bay && ['waiting', 'loading'].includes(trip.phase)) {
                 candidate.phase = 'walking-car'; candidate.progress = 0;
             }
-            if (pedestrianMotionBlocked(town, stationPassengerPose(town, person, 1, 1), stationPassengerPose(town, candidate, 1, 1))) {
-                person.fireEngineWaiting = true;
+            if (pedestrianMotionBlocked(town, stationPassengerPose(town, person, 1, 1), stationPassengerPose(town, candidate, 1, 1), { blockers })) {
+                person.trafficWaiting = true;
+                person.fireEngineWaiting = Boolean(town.fireEngine?.active);
                 continue;
             }
         }
@@ -291,9 +294,12 @@ function maintainTrips(town, dt) {
         arriveEvent(town, trip, time);
         trip.previousElapsed = trip.elapsed; trip.previousPhase = trip.phase;
         const car = trip.car;
-        trip.fireEngineWaiting = false;
+        trip.fireEngineWaiting = false; trip.trafficWaiting = false;
         if (car && ['pulling-in', 'turning-in-bay', 'pulling-out'].includes(trip.phase) &&
-            stationMovementBlocked(town, trip, trip.elapsed, trip.elapsed + dt)) trip.fireEngineWaiting = true;
+            stationMovementBlocked(town, trip, trip.elapsed, trip.elapsed + dt)) {
+            trip.trafficWaiting = true;
+            trip.fireEngineWaiting = Boolean(town.fireEngine?.active);
+        }
         else trip.elapsed += dt;
         if (car && !alive.has(car)) {
             trip.car = null; trip.phase = 'finished'; trip.bay = null;
@@ -392,10 +398,11 @@ function normalRoadPose(town, car, widthFactor) {
 }
 
 // Station bay motion runs before Simulation.step, so its elapsed-time path
-// needs the same physical player-body veto as ordinary forward road motion.
+// needs the same current-body and promised-recovery veto as road motion.
 function stationMovementBlocked(town, trip, from, to, changes = {}) {
-    const player = town.fireEngine?.pose;
-    if (!town.fireEngine?.active || !player || !trip.car) return false;
+    if (!trip.car || !hasPedestrianTrafficBodies(town)) return false;
+    const blockers = pedestrianTrafficBodies(town).filter(body => body.ownerId !== trip.car.id);
+    if (!blockers.length) return false;
     const widthFactor = town.walking?.widthFactor || 2.5;
     // Keep increments under 0.03 s, including a complete pi-radian bay turn.
     // This checks the swept body rather than just the two endpoint positions.
@@ -407,8 +414,8 @@ function stationMovementBlocked(town, trip, from, to, changes = {}) {
         const p = stationVehiclePose(town, { ...trip.car, stationVisit: sample }, widthFactor, 1);
         if (!p) continue;
         const factor = Math.min(widthFactor * p.road.size, p.road.widthCap || Infinity);
-        if (orientedBodiesOverlap(player, { ...p, length: trip.car.length,
-            width: trip.car.width * factor, layer: p.road.layer }, 0.3)) return true;
+        const body = { ...p, length: trip.car.length, width: trip.car.width * factor, layer: p.road.layer };
+        if (blockers.some(blocker => orientedBodiesOverlap(blocker, body, 0.3))) return true;
     }
     return false;
 }
@@ -461,7 +468,7 @@ export function stationPassengerPose(town, person, widthFactor = 1, alpha = 1) {
         const slot = Math.max(0, queue.indexOf(person));
         p = { x: p.x + slot % 2 * 3.2, y: p.y + Math.floor(slot / 2) * 4 - offset };
     }
-    moving &&= !person.fireEngineWaiting;
+    moving &&= !person.trafficWaiting && !person.fireEngineWaiting;
     return { x: p.x, y: p.y + offset, angle, moving, speed: moving ? person.speed : 0,
         phase: person.phase, colour: person.colour, visible: true, layer: 0, age: person.elapsed };
 }

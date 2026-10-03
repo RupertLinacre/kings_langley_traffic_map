@@ -236,6 +236,10 @@ export function fireEngineObstacles(town, widthFactor = town.walking?.widthFacto
         addSpanBodies(result, town, { edge: turn.edge, start: Math.max(0, turn.centre - turn.radius), end: Math.min(turn.edge.length, turn.centre + turn.radius) }, widthFactor, 'turning car', turn.car.id);
     for (const pass of sim.busOvertaking?.passes?.values() || [])
         for (const span of pass.spans) addSpanBodies(result, town, span, widthFactor, 'overtaking car', pass.car.id);
+    // Recovery bodies use only the shared pose provider, so this does not call
+    // the obstacle provider recursively. A new player manoeuvre must respect
+    // the space an ordinary driver has already promised to reverse/merge into.
+    result.push(...(sim.cooperative?.reservedBodies?.() || []));
     return result;
 }
 function carBody(town, car, size) {

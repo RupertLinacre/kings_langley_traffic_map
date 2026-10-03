@@ -352,8 +352,8 @@ function updateOtherSelection(alpha) {
         if (!person) { clearSelection(); return; }
         p = pedestrianPose(town, person, Number(width.value) / 100);
         title = 'A village wanderer'; description = p.road.tags.name || 'Along a village pavement';
-        story = person.activity || 'Off for a little walk around the village.';
-        status = person.state.includes('wait') ? 'Looking and waiting' : person.pause ? 'A little rest' : 'One step at a time';
+        story = person.trafficWaiting ? 'Waiting for a vehicle to clear the path.' : person.activity || 'Off for a little walk around the village.';
+        status = person.trafficWaiting ? 'Waiting for a clear path' : person.state.includes('wait') ? 'Looking and waiting' : person.pause ? 'A little rest' : 'One step at a time';
     } else if (target.kind === 'family') {
         const group = town.purposefulJourneys?.groups.find(group => group.id === target.id);
         p = group && groupPose(town, group, Number(width.value) / 100, paused ? 1 : alpha);
@@ -361,7 +361,8 @@ function updateOtherSelection(alpha) {
         title = group.label || 'A village family';
         description = group.trip?.school?.name || 'A purposeful village walk';
         story = group.activity || 'Walking together, from the car to the school gates.';
-        status = group.walker?.state?.includes('wait') ? 'Waiting together for a safe crossing' : 'A little walk together';
+        status = group.walker?.trafficWaiting ? 'Waiting together for a clear path' :
+            group.walker?.state?.includes('wait') ? 'Waiting together for a safe crossing' : 'A little walk together';
     } else if (target.kind === 'passenger') {
         const person = town.stationVisits?.passengers.find(person => person.id === target.id);
         if (!person) { clearSelection(); return; }
@@ -371,7 +372,7 @@ function updateOtherSelection(alpha) {
         description = 'Kings Langley station';
         story = person.kind === 'pickup' ? 'The train has arrived. Time for a little walk to the car and a lift home.' :
             'Dropped off at the station. A little walk, then a wait for the next local train.';
-        status = { 'waiting-train': 'Waiting on the platform', boarding: 'Hopping aboard the train',
+        status = person.trafficWaiting ? 'Waiting for a clear path' : { 'waiting-train': 'Waiting on the platform', boarding: 'Hopping aboard the train',
             alighting: 'Getting off the train', 'waiting-car': 'Waiting for a lift', 'boarding-car': 'Getting into the car' }[person.phase] || 'Walking through the station';
     } else if (target.kind === 'train') {
         const train = town.trains.find(train => train.id === target.id);
@@ -676,9 +677,14 @@ timeOfDay.addEventListener('change', () => {
 });
 width.addEventListener('input', () => {
     const requested = Number(width.value) / 100;
+    const makingRoom = town.simulation.cars.some(car => town.simulation.cooperative?.active(car) ||
+        town.simulation.emergency.isYielding(car));
     const blocked = town.simulation.cars.some(car => car.turnaround &&
         !turnaroundFits(car, roadWidthFactor(map.roadById.get(map.data.edges[car.route[car.index]].way), requested)));
-    if (blocked) {
+    if (makingRoom && requested !== acceptedRoadWidth) {
+        width.value = acceptedRoadWidth * 100;
+        notify('Let the drivers finish making room before changing road width.');
+    } else if (blocked) {
         width.value = acceptedRoadWidth * 100;
         notify('Let the turning car finish before narrowing the road.');
     } else { acceptedRoadWidth = requested; town.walking.widthFactor = requested; }

@@ -148,26 +148,35 @@ export function createRealTown(map, demand, seed, { cyclists = 24, pedestrians =
     simulation.emergency.setSurfaceProvider(body => bodyOnPavedSurface(town, body, town.walking.widthFactor, { road: body.road }));
     simulation.crossingStop = (car, edge) => pedestrianTrafficLimit(town, car, edge);
     simulation.crossingSpawnAllowed = car => pedestrianSpawnAllowed(town, car) && simulation.adaptive.spawnAllowed(car) &&
-        simulation.busOvertaking.spawnAllowed(car) && simulation.parking.spawnAllowed(car) && simulation.emergency.spawnAllowed(car);
+        simulation.busOvertaking.spawnAllowed(car) && simulation.parking.spawnAllowed(car) && simulation.emergency.spawnAllowed(car) &&
+        (simulation.cooperative?.spawnAllowed(car) ?? true);
     simulation.turnaroundAllowed = (car, edge, d, radius) =>
         !car.emergencyYield?.active && Math.abs(car.emergencyYield?.offset || 0) < 0.05 &&
+        !simulation.cooperative?.active(car) &&
         turnaroundFits(car, roadWidthFactor(map.roadById.get(edge.way), town.walking.widthFactor)) &&
         !town.walking.crossings.some(crossing => crossing.edgeDistances.has(edge.id) && Math.abs(crossing.edgeDistances.get(edge.id) - d) < radius + 8) &&
-        simulation.emergency.corridorAllowed(edge, d - radius, d + radius, car.width * roadWidthFactor(map.roadById.get(edge.way), town.walking.widthFactor));
+        simulation.emergency.corridorAllowed(edge, d - radius, d + radius, car.width * roadWidthFactor(map.roadById.get(edge.way), town.walking.widthFactor)) &&
+        (simulation.cooperative?.corridorAllowed(edge, d - radius, d + radius, car.width * roadWidthFactor(map.roadById.get(edge.way), town.walking.widthFactor)) ?? true);
     simulation.busPassAllowed = (car, edge, from, to) =>
         !car.emergencyYield?.active && Math.abs(car.emergencyYield?.offset || 0) < 0.05 &&
+        !simulation.cooperative?.active(car) &&
         !town.walking.crossings.some(crossing => crossing.edgeDistances.has(edge.id) &&
             crossing.edgeDistances.get(edge.id) > from - 12 && crossing.edgeDistances.get(edge.id) < to + 12) &&
-        simulation.emergency.corridorAllowed(edge, from - 12, to + 12, 4 * roadWidthFactor(map.roadById.get(edge.way), town.walking.widthFactor));
+        simulation.emergency.corridorAllowed(edge, from - 12, to + 12, 4 * roadWidthFactor(map.roadById.get(edge.way), town.walking.widthFactor)) &&
+        (simulation.cooperative?.corridorAllowed(edge, from - 12, to + 12, 4 * roadWidthFactor(map.roadById.get(edge.way), town.walking.widthFactor)) ?? true);
     simulation.parkingManoeuvreAllowed = (car, edge, d, radius) =>
         !car.emergencyYield?.active && Math.abs(car.emergencyYield?.offset || 0) < 0.05 &&
+        !simulation.cooperative?.active(car) &&
         !town.walking.crossings.some(crossing => crossing.edgeDistances.has(edge.id) &&
             Math.abs(crossing.edgeDistances.get(edge.id) - d) < radius + 3.5) &&
-        simulation.emergency.corridorAllowed(edge, d - radius, d + radius, 4 * roadWidthFactor(map.roadById.get(edge.way), town.walking.widthFactor));
+        simulation.emergency.corridorAllowed(edge, d - radius, d + radius, 4 * roadWidthFactor(map.roadById.get(edge.way), town.walking.widthFactor)) &&
+        (simulation.cooperative?.corridorAllowed(edge, d - radius, d + radius, 4 * roadWidthFactor(map.roadById.get(edge.way), town.walking.widthFactor)) ?? true);
     simulation.parkingCorridorAllowed = (_car, edge, start, end) => {
         const road = map.roadById.get(edge.way);
         return simulation.emergency.corridorAllowed(edge, start, end,
-            road.baseWidth * roadWidthFactor(road, town.walking.widthFactor) / 2 + 3);
+            road.baseWidth * roadWidthFactor(road, town.walking.widthFactor) / 2 + 3) &&
+            (simulation.cooperative?.corridorAllowed(edge, start, end,
+                road.baseWidth * roadWidthFactor(road, town.walking.widthFactor) / 2 + 3) ?? true);
     };
     simulation.parking.enableActivities?.(true);
     attachPurposefulJourneys(town);
@@ -277,7 +286,8 @@ export function realVehiclePose(town, car, widthFactor, alpha = 1) {
         const normal = s.parking.lateral(car, edge, d, laneOffset(edge, car.lanes[index]));
         const factor = roadWidthFactor(road, widthFactor);
         const passing = s.busOvertaking?.lateral(car, edge, d, normal, alpha) ?? normal;
-        const lateral = (s.emergency?.lateral(car, edge, passing, factor, alpha) ?? passing) * factor;
+        const makingRoom = s.cooperative?.lateral(car, edge, passing, factor, alpha) ?? passing;
+        const lateral = (s.emergency?.lateral(car, edge, makingRoom, factor, alpha) ?? makingRoom) * factor;
         return { x: p.x + p.dy * lateral, y: p.y - p.dx * lateral, edge, road, angle: Math.atan2(p.dy, p.dx) };
     }
     const p = at(q), a = at(Math.max(0, q - car.length * 0.35)), b = at(Math.min(car.offsets.at(-1), q + car.length * 0.35));

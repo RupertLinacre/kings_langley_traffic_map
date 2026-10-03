@@ -3,6 +3,7 @@ import { movementsCompatible } from './junction-movements.mjs';
 import { AdaptiveTraffic } from './adaptive-traffic.mjs';
 import { BusOvertaking } from './bus-overtaking.mjs';
 import { EmergencyTraffic } from './emergency-traffic.mjs';
+import { CooperativeManoeuvres } from './cooperative-manoeuvres.mjs';
 import { applyDriver, createDriver, driverAcceleration, resetDriverResponse } from './driver-behaviour.mjs';
 import { isCirculatory, junction20Signal } from './junction20.mjs';
 import {
@@ -129,6 +130,7 @@ export class Simulation {
     this.adaptive = new AdaptiveTraffic(this);
     this.busOvertaking = new BusOvertaking(this);
     this.emergency = new EmergencyTraffic(this);
+    this.cooperative = new CooperativeManoeuvres(this);
     this.routes = this.routeSpecs.map((r) => r.path);
     this.totalRate = this.routeSpecs.reduce((sum, r) => sum + r.rate, 0);
     this.popularityClasses = popularityClasses(data, this.routeSpecs);
@@ -262,7 +264,8 @@ export class Simulation {
       const base = c.offsets[i] - startQ;
       if (base > lookahead) break;
       for (const fragment of occupied.get(key(c.route[i], c.lanes[i])) || []) {
-        if (fragment.car === c || this.busOvertaking.skipsBus(c, fragment.car) || base + fragment.end < -0.001) continue;
+        if (fragment.car === c || this.busOvertaking.skipsBus(c, fragment.car) ||
+          this.cooperative.skipsLeader(c, fragment.car) || base + fragment.end < -0.001) continue;
         const gap = base + fragment.start;
         if (gap < nearest.gap)
           nearest = {
@@ -346,7 +349,7 @@ export class Simulation {
     const entryClearance = c => {
       if (clearances.has(c)) return clearances.get(c);
       let gap = Math.min(this.leader(c, occupied).gap, this.parking.constraint(c).gap, this.parking.gap?.(c) ?? Infinity,
-        this.closures.gap(c), this.adaptive.gap(c), this.busOvertaking.gap(c), this.emergency.gap(c));
+        this.closures.gap(c), this.adaptive.gap(c), this.busOvertaking.gap(c), this.emergency.gap(c), this.cooperative.gap(c));
       for (let i = c.index; i < c.route.length && c.offsets[i] - c.q < 180; i++) {
         const edge = this.data.edges[c.route[i]], distance = c.offsets[i + 1] - c.q;
         gap = Math.min(gap, c.offsets[i] + (this.crossingStop?.(c, edge) ?? Infinity) - c.q);
@@ -365,6 +368,7 @@ export class Simulation {
           !r.car.parked && !r.car.turnaround &&
           (!this.parking.managesMotion(r.car) || r.car.q >= r.crossing) &&
           (!this.emergency.managesMotion(r.car) || r.car.q >= r.crossing) &&
+          (!this.cooperative.managesMotion(r.car) || r.car.q >= r.crossing) &&
           r.car.q < r.crossing + r.car.length + 0.5 &&
           // An entered body still owns its crossing. An unused approach claim
           // must not hold other traffic while its driver waits at a bus stop,
@@ -378,7 +382,7 @@ export class Simulation {
     }
     const requests = [];
     for (const c of this.cars) {
-      if (c.parked || c.turnaround || this.parking.managesMotion(c) || this.emergency.managesMotion(c)) continue;
+      if (c.parked || c.turnaround || this.parking.managesMotion(c) || this.emergency.managesMotion(c) || this.cooperative.managesMotion(c)) continue;
       const chain = [];
       let ringHorizon = null;
       let incomplete = false;
@@ -520,7 +524,7 @@ export class Simulation {
         continue;
       const edge = this.data.edges[c.route[c.index]];
       c.v = Math.min(edge.speed, c.maxSpeed) * 0.65;
-      if (this.crossingSpawnAllowed?.(c) === false || !this.emergency.spawnAllowed(c) || !this.adaptive.spawnAllowed(c) || !this.parking.spawnAllowed(c) || !this.busOvertaking.spawnAllowed(c)) continue;
+      if (this.crossingSpawnAllowed?.(c) === false || !this.emergency.spawnAllowed(c) || !this.cooperative.spawnAllowed(c) || !this.adaptive.spawnAllowed(c) || !this.parking.spawnAllowed(c) || !this.busOvertaking.spawnAllowed(c)) continue;
       const spans = [];
       for (
         let j = c.index;
@@ -591,7 +595,7 @@ export class Simulation {
           c = this.createVehicle(spec.path, type, VEHICLES[type].length, lane);
         if (ticket.driver) applyDriver(c, ticket.driver);
         if (c.q >= c.offsets.at(-1)) continue;
-        if (this.crossingSpawnAllowed?.(c) === false || !this.emergency.spawnAllowed(c) || !this.adaptive.spawnAllowed(c) || !this.parking.spawnAllowed(c) || !this.busOvertaking.spawnAllowed(c)) continue;
+        if (this.crossingSpawnAllowed?.(c) === false || !this.emergency.spawnAllowed(c) || !this.cooperative.spawnAllowed(c) || !this.adaptive.spawnAllowed(c) || !this.parking.spawnAllowed(c) || !this.busOvertaking.spawnAllowed(c)) continue;
         const leader = this.leader(c, occupied);
         if (leader.gap < 3) continue;
         let intersects = false;
@@ -649,7 +653,7 @@ export class Simulation {
   changeLanes(occupied) {
     for (const c of this.cars) {
       if (
-        c.parked || c.parkingActivity || c.turnaround || c.busPass || this.emergency.isYielding(c) ||
+        c.parked || c.parkingActivity || c.turnaround || c.busPass || this.emergency.isYielding(c) || this.cooperative.active(c) ||
         c.parkingPassages.some(
           (p) => p.zone.narrow && c.q > p.entry - 30 && c.q < p.exit + 20,
         )
@@ -687,7 +691,7 @@ export class Simulation {
         // passing car back into its old lane, without a real junction claim.
         c.lanes = previousLanes.slice();
         for (let i = c.index; i <= continuation; i++) c.lanes[i] = target;
-        if (!this.emergency.spawnAllowed(c)) { c.lanes = previousLanes; continue; }
+        if (!this.emergency.spawnAllowed(c) || !this.cooperative.spawnAllowed(c)) { c.lanes = previousLanes; continue; }
         const next = this.leader(c, occupied),
           advantage =
             idmAcceleration(
@@ -725,10 +729,12 @@ export class Simulation {
     occupied = this.occupancy();
     this.busOvertaking.update(dt, occupied);
     occupied = this.occupancy();
+    this.cooperative.update(dt, occupied);
+    occupied = this.occupancy();
     this.reserve(occupied);
     const updates = [];
     for (const c of this.cars) {
-      if (c.parked || this.parking.managesMotion(c) || this.emergency.managesMotion(c) || (c.turnaround && !c.turnaround.preparing)) {
+      if (c.parked || this.parking.managesMotion(c) || this.emergency.managesMotion(c) || this.cooperative.managesMotion(c) || (c.turnaround && !c.turnaround.preparing)) {
         resetDriverResponse(c);
         continue;
       }
@@ -756,11 +762,12 @@ export class Simulation {
             c.maxSpeed,
             this.busOvertaking.speed(c),
             this.emergency.speed(c),
+            this.cooperative.speed(c),
             restriction.speed,
             edge.speed * c.desiredFactor,
             isCirculatory(edge.tags) ? 8 : Infinity,
           ) * (this.overrides.get(edge.id) || 1);
-      const diversionGap = Math.min(this.closures.gap(c), this.adaptive.gap(c), this.busOvertaking.gap(c), this.parking.gap?.(c) ?? Infinity, this.emergency.gap(c));
+      const diversionGap = Math.min(this.closures.gap(c), this.adaptive.gap(c), this.busOvertaking.gap(c), this.parking.gap?.(c) ?? Infinity, this.emergency.gap(c), this.cooperative.gap(c));
       let gap = Math.min(leader.gap, restriction.gap, diversionGap),
         leaderSpeed =
           restriction.gap < leader.gap || diversionGap < leader.gap
@@ -811,10 +818,10 @@ export class Simulation {
         gap = stopDistance + c.minGap;
         leaderSpeed = 0;
       }
-      const immediateAcceleration = idmAcceleration(c, desired, gap, leaderSpeed),
-        acc = driverAcceleration(c, immediateAcceleration, this.time, stopDistance < 8 || c.turnaround?.preparing),
+      const immediateAcceleration = idmAcceleration(this.cooperative.following(c), desired, gap, leaderSpeed),
+        acc = driverAcceleration(c, immediateAcceleration, this.time, stopDistance < 8 || c.turnaround?.preparing || c.cooperativeManoeuvre?.phase === 'creeping'),
         result = integrate(c.v, acc, dt);
-      const move = this.emergency.limitMove(c, Math.max(0, Math.min(result.move, gap - 0.25, stopDistance)));
+      const move = this.cooperative.limitMove(c, this.emergency.limitMove(c, Math.max(0, Math.min(result.move, gap - 0.25, stopDistance))));
       updates.push({
         c,
         move,

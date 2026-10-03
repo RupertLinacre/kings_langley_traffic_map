@@ -296,13 +296,14 @@ export class Parking {
       for (const [id, claim] of zone.claims)
         if (
           claim.car.parked ||
+          s.cooperative?.suspendsParking(claim.car) ||
           !s.cars.includes(claim.car) ||
           claim.car.q - claim.car.length > claim.exit + 2
         )
           zone.claims.delete(id);
       const requests = [];
       for (const c of s.cars) {
-        if (c.parked || c.parkingActivity) continue;
+        if (c.parked || c.parkingActivity || s.cooperative?.suspendsParking(c)) continue;
         for (const p of c.parkingPassages || []) {
           if (
             this.controller(p) !== zone ||

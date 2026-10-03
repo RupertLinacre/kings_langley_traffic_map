@@ -2,6 +2,18 @@ import { journeyStory } from './purposeful-journeys.mjs';
 
 export function vehicleStory(town, car) {
     const s = town.simulation;
+    const makingRoom = car.cooperativeManoeuvre;
+    if (makingRoom) {
+        const phases = {
+            'pulling-in': 'Pulling closer to the kerb to make room for another driver.',
+            'pulling-aside': 'Pulling closer to the kerb to make room for another driver.',
+            'backing-up': 'Reversing into a clear gap so another car can get through.',
+            waiting: 'Holding back and letting the other driver squeeze through.',
+            returning: 'The way is clear. Carefully moving back into the lane.',
+            creeping: 'Edging forward slowly to clear the way for another driver.',
+        };
+        if (phases[makingRoom.phase]) return phases[makingRoom.phase];
+    }
     const activity = car.parkingActivity;
     if (activity) {
         const phases = { 'reverse-in': 'Reversing carefully into the space. Other drivers wait for the manoeuvre.',

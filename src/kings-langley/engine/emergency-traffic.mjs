@@ -47,7 +47,8 @@ export class EmergencyTraffic {
       while (centreIndex > 0 && centre < car.offsets[centreIndex]) centreIndex--;
       const centreEdge = this.sim.data.edges[car.route[centreIndex]];
       const point = position(centreEdge, centre - car.offsets[centreIndex]);
-      const lateral = this.lateral(posed, centreEdge, laneOffset(centreEdge, car.lanes[centreIndex]), 1);
+      const cooperative = this.sim.cooperative?.lateral(posed, centreEdge, laneOffset(centreEdge, car.lanes[centreIndex]), 1) ?? laneOffset(centreEdge, car.lanes[centreIndex]);
+      const lateral = this.lateral(posed, centreEdge, cooperative, 1);
       p = { x: point.x + point.dy * lateral, y: point.y - point.dx * lateral,
         angle: Math.atan2(point.dy, point.dx), edge: centreEdge, widthFactor: 1,
         roadHalfWidth: laneCount(centreEdge) * 3.3, layer: edgeLayer(centreEdge) };
@@ -78,6 +79,7 @@ export class EmergencyTraffic {
     return false;
   }
   eligibleShift(car, body) {
+    if (this.sim.cooperative?.active(car)) return false;
     if (body.station || car.parked || car.parkingActivity || car.turnaround || car.busPass || car.stationMovement ||
       car.roadStop && !car.roadStop.done && car.roadStop.remaining !== null) return false;
     // An approaching junction or parked row is not itself a refusal: the
@@ -88,6 +90,7 @@ export class EmergencyTraffic {
     return (this.surfaceProvider || a.dx * b.dx + a.dy * b.dy > 0.985) && Number.isFinite(body.roadHalfWidth);
   }
   hearsSiren(car, body) {
+    if (this.sim.cooperative?.active(car)) return false;
     const p = this.player;
     if (!p?.siren || !sameLayer(body, p) || body.station || car.parked || car.parkingActivity || car.turnaround || car.busPass) return false;
     const dx = body.x - p.x, dy = body.y - p.y, distance = Math.hypot(dx, dy);
@@ -193,6 +196,7 @@ export class EmergencyTraffic {
    * Parked/animated actors keep their own controllers and cannot be pushed.
    */
   tryNudge(car, playerCandidate, force = 1) {
+    if (this.sim.cooperative?.active(car)) return false;
     if (!this.sim.cars.includes(car) || car.type !== 'car' || car.parked || car.parkingActivity || car.turnaround ||
       car.busPass || car.stationMovement || car.roadStop?.remaining != null || this.clearingJunction(car)) return false;
     const body = this.body(car);
@@ -243,7 +247,7 @@ export class EmergencyTraffic {
     for (const car of this.sim.cars) {
       const body = bodies.get(car.id), heard = this.hearsSiren(car, body);
       let state = this.states.get(car.id);
-      if (body.station || car.parked || car.parkingActivity || car.turnaround || car.busPass) {
+      if (body.station || car.parked || car.parkingActivity || car.turnaround || car.busPass || this.sim.cooperative?.active(car)) {
         this.states.delete(car.id); this.owners.delete(car.id); delete car.emergencyYield; continue;
       }
       if (!state && !heard) continue;

@@ -75,23 +75,48 @@ function linkPoint(link, progress, width) {
     return { ...a, x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, angle: Math.atan2(b.y - a.y, b.x - a.x) };
 }
 
-/** Test a pedestrian's short swept step against the current player body.
- * Dimensions match fireEngineObstacles, including the smaller child body;
- * the engine pose already contains its illustrated width and bridge layer. */
-export function pedestrianMotionBlocked(town, from, to, { length = 2.6, width = 2.1 } = {}) {
-    const engine = town.fireEngine, body = engine?.pose;
-    if (!engine?.active || !body || to?.visible === false || !to ||
-        ![body.x, body.y, body.length, body.width, to.x, to.y].every(Number.isFinite)) return false;
+/** Only actors that have actually left their ordinary traffic lane (or own a
+ * recovery sweep) protect future pavement steps. Normal road traffic continues
+ * to use zebra/gap-crossing decisions rather than blocking the whole pavement. */
+export function pedestrianTrafficBodies(town) {
+    const sim = town.simulation, bodies = [];
+    if (town.fireEngine?.active && town.fireEngine.pose) bodies.push(town.fireEngine.pose);
+    for (const controller of [sim?.cooperative, sim?.emergency]) {
+        if (!controller) continue;
+        if (controller.blockingBodies) { bodies.push(...controller.blockingBodies()); continue; }
+        for (const [id, state] of controller.states || []) {
+            if (controller === sim.emergency && Math.abs(state.offset || 0) <= 0.02 && !state.reverse) continue;
+            const car = controller.owners?.get(id) || state.car || sim.cars?.find(car => car.id === id);
+            if (!car || !sim.cars?.includes(car)) continue;
+            const body = sim.emergency?.body?.(car);
+            if (body) bodies.push(body);
+        }
+        bodies.push(...(controller.reservedBodies?.() || []));
+    }
+    return bodies;
+}
+export function hasPedestrianTrafficBodies(town) {
+    return Boolean(town.fireEngine?.active || town.simulation?.cooperative?.states?.size || town.simulation?.emergency?.states?.size);
+}
+
+/** Test a short pedestrian sweep against the current player and displaced
+ * traffic/recovery pockets. Dimensions match the visible adult/child artwork;
+ * every traffic body already includes its illustrated width and bridge layer. */
+export function pedestrianMotionBlocked(town, from, to, { length = 2.6, width = 2.1, blockers = pedestrianTrafficBodies(town) } = {}) {
+    if (!blockers.length || to?.visible === false || !to || ![to.x, to.y].every(Number.isFinite)) return false;
     const start = from?.visible === false || !from ? to : from;
-    if ((to.layer ?? 0) !== (body.layer ?? 0)) return false;
+    const relevant = blockers.filter(body => (body.layer ?? body.road?.layer ?? 0) === (to.layer ?? 0) &&
+        [body.x, body.y, body.length, body.width].every(Number.isFinite));
+    if (!relevant.length) return false;
     const distance = Math.hypot(to.x - start.x, to.y - start.y);
     const count = Math.max(1, Math.ceil(distance / 0.4));
     const turn = Math.atan2(Math.sin((to.angle || 0) - (start.angle || 0)), Math.cos((to.angle || 0) - (start.angle || 0)));
     for (let i = 0; i <= count; i++) {
         const t = i / count;
-        if (orientedBodiesOverlap(body, { x: start.x + (to.x - start.x) * t,
+        const candidate = { x: start.x + (to.x - start.x) * t,
             y: start.y + (to.y - start.y) * t, angle: (start.angle || 0) + turn * t,
-            length, width, layer: to.layer ?? 0 }, 0.25)) return true;
+            length, width, layer: to.layer ?? 0 };
+        if (relevant.some(body => orientedBodiesOverlap(body, candidate, 0.25))) return true;
     }
     return false;
 }
@@ -114,7 +139,9 @@ function walkingBodies(town, person, progress) {
 }
 
 function blockedProgress(town, person, link, target) {
-    if (!town.fireEngine?.active) return false;
+    if (!hasPedestrianTrafficBodies(town)) return false;
+    const blockers = pedestrianTrafficBodies(town);
+    if (!blockers.length) return false;
     // Sample curved corners as well as long caller timesteps. Each following
     // short swept segment is checked with the shared oriented-body test.
     const count = Math.max(1, Math.ceil(Math.abs(target - person.progress) * link.length / 0.4));
@@ -122,8 +149,9 @@ function blockedProgress(town, person, link, target) {
     for (let i = 1; i <= count; i++) {
         const progress = person.progress + (target - person.progress) * i / count;
         const next = walkingBodies(town, person, progress);
-        if (next.some((body, index) => pedestrianMotionBlocked(town, previous[index] || body, body, body))) {
-            person.fireEngineWaiting = true;
+        if (next.some((body, index) => pedestrianMotionBlocked(town, previous[index] || body, body, { ...body, blockers }))) {
+            person.trafficWaiting = true;
+            person.fireEngineWaiting = Boolean(town.fireEngine?.active);
             return true;
         }
         previous = next;
@@ -460,6 +488,7 @@ export function updatePedestrians(town, dt) {
     const ready = new Map(w.crossings.filter(c => c.kind !== 'gap' && c.users.size).map(c => [c, canEnter(town, c)]));
     for (const person of town.people) {
         person.fireEngineWaiting = false;
+        person.trafficWaiting = false;
         if (person.pause > 0) { person.pause = Math.max(0, person.pause - dt); continue; }
         let remaining = dt;
         for (let step = 0; step < 24 && remaining > 0; step++) {
@@ -565,6 +594,7 @@ export function updateLinkedWalker(town, person, dt) {
     if (!(dt > 0) || person.arrived || !person.route?.length) return;
     town.walking.linked.add(person);
     person.fireEngineWaiting = false;
+    person.trafficWaiting = false;
     person.previousIndex = person.index; person.previousProgress = person.progress;
     let remaining = dt;
     for (let step = 0; step < 24 && remaining > 0; step++) {
@@ -594,7 +624,7 @@ export function updateLinkedWalker(town, person, dt) {
     }
 }
 export function drawPedestrian(g, person, pose, time) {
-    const waiting = person.fireEngineWaiting || ['crossing_wait', 'gap_wait', 'gap_middle_wait'].includes(person.state);
+    const waiting = person.trafficWaiting || person.fireEngineWaiting || ['crossing_wait', 'gap_wait', 'gap_middle_wait'].includes(person.state);
     const stride = !waiting && !person.pause ? Math.sin(time * person.speed * 5 + person.id) * 1.5 : 0;
     g.save(); g.translate(pose.x, pose.y); g.rotate(pose.angle); g.scale(0.5, 0.5);
     circle(g, 1, 2, 3.8, '#304b3c25');

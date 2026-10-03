@@ -358,7 +358,8 @@ export class RealMapRenderer {
                 const bus = car.type === 'bus';
                 const current = this.map.data.edges[car.route[car.index]], next = this.map.data.edges[car.route[car.index + 1]];
                 let indicator = car.emergencyYield?.active ? -1 : Math.abs(car.emergencyYield?.offset || 0) > 0.05 ? 1 :
-                    s.parking.indicator?.(car) || (car.turnaround ? 1 : car.busPass?.phase === 'out' ? 1 : car.busPass?.phase === 'return' ? -1 : 0);
+                    s.cooperative?.indicator?.(car) || s.parking.indicator?.(car) ||
+                    (car.turnaround ? 1 : car.busPass?.phase === 'out' ? 1 : car.busPass?.phase === 'return' ? -1 : 0);
                 if (!indicator && next && current.length - car.d < 35) {
                     const a = position(current, current.length), b = position(next, 0);
                     const angle = Math.atan2(a.dx * b.dy - a.dy * b.dx, a.dx * b.dx + a.dy * b.dy);
@@ -366,7 +367,8 @@ export class RealMapRenderer {
                 }
                 drawVehicle(g, { bus, type: car.type, length: car.length * 2, width: car.width * (p.station ? 1 : this.factor(p.road)) * 2,
                     colour: bus ? car.busStyle.colour : car.paint, route: car.busStyle, braking: car.v < 1, dwell: car.roadStop?.remaining || 0,
-                    indicator, reversing: car.turnaround?.reversing || car.parkingActivity?.reversing || car.emergencyYield?.reversing },
+                    indicator, reversing: car.turnaround?.reversing || car.parkingActivity?.reversing ||
+                        car.emergencyYield?.reversing || car.cooperativeManoeuvre?.reversing },
                     { x: p.x * 2, y: p.y * 2, angle: p.angle }, time);
             }
             g.restore();

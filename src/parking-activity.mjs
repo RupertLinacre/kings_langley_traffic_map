@@ -506,8 +506,25 @@ export class ParkingActivity {
     // group that has just been admitted the other way around its short node.
     for (const other of this.parking.zones) {
       if (other === root || other.name !== root.name) continue;
-      const claim = [...other.claims.values()][0];
-      if (claim) return claim.direction;
+      for (const claim of other.claims.values()) {
+        const car = claim.car;
+        const passage = car.parkingPassages?.find(p => this.parking.controller(p) === section &&
+          p.exit + 2 >= car.q - car.length);
+        if (!passage || passage.direction !== claim.direction) continue;
+        // A same-name claim is relevant only while this driver continues
+        // through the requested section along the same road. A resident may
+        // turn into Osbourne Avenue, loop round Havelock/Belham, then return
+        // to Coniston from the other end; that future visit cannot lock an
+        // otherwise empty section in the direction of its current journey.
+        let continuous = true;
+        for (let i = car.index; i < car.route.length && car.offsets[i] < passage.entry; i++) {
+          if (this.sim.data.edges[car.route[i]].tags.name !== root.name) {
+            continuous = false;
+            break;
+          }
+        }
+        if (continuous) return passage.direction;
+      }
     }
     return 0;
   }
@@ -583,7 +600,13 @@ export class ParkingActivity {
     const replaced = new Set();
     for (const zone of this.parking.zones) {
       const key = this.visibleSlots(zone).map(actor => actor.slot).sort((a, b) => a - b).join(',');
-      if (key === zone.layoutKey) continue;
+      if (key === zone.layoutKey) {
+        // A cancelled departure/arrival can restore the already active row
+        // while a previous change was waiting for its claims to drain. There
+        // is then no pending layout to protect, so admit traffic normally.
+        zone.reconfiguring = false;
+        continue;
+      }
       if (!force && zone.claims.size) { zone.reconfiguring = true; continue; }
       const proposed = this.sectionsFor(zone);
       if (!force && !this.safeLayout(proposed)) { zone.reconfiguring = true; continue; }
