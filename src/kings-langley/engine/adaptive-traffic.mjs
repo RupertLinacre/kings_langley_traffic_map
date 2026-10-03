@@ -83,7 +83,7 @@ export class AdaptiveTraffic {
     }, 0);
   }
   hasCommitment(car) {
-    return car.parked || car.turnaround || (car.roadStop && !car.roadStop.done) ||
+    return car.parked || car.parkingActivity || car.purposefulJourney || car.turnaround || car.busPass || (car.roadStop && !car.roadStop.done) ||
       (this.reviewCommitments ? this.reviewCommitments.has(car.id) :
       this.sim.parking.zones.some(zone => zone.claims.has(car.id)) ||
       [...this.sim.reservations.values()].some(claims => claims.some(r => r.car === car && r.crossing > car.q)));
@@ -142,6 +142,11 @@ export class AdaptiveTraffic {
     const occupied = this.sim.occupancy();
     for (const candidate of [edge, reverse]) {
       const middle = candidate.id === edge.id ? centre : edge.length - centre;
+      for (const pass of this.sim.busOvertaking?.passes.values() || []) for (const span of pass.spans) {
+        const start = candidate.id === span.edge.id ? span.start : candidate.id === span.reverse.id ? span.reverseStart : null;
+        const end = candidate.id === span.edge.id ? span.end : span.reverseEnd;
+        if (start !== null && start < middle + radius + 2 && end > middle - radius - 2) return false;
+      }
       for (const fragment of occupied.get(`${candidate.id}:0`) || []) {
         if (fragment.car === car) continue;
         const braking = fragment.car.v * fragment.car.v / 4 + fragment.car.v * 1.2;

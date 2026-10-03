@@ -45,11 +45,29 @@ export function trackPoint(route, distance) {
     return { ...p, layer: segment.item.layer, segment };
 }
 
-export function trainPose(train, time) {
+/** Timing constants shared by rendered train motion and station transfers. */
+export function trainTiming(train) {
     const dwell = train.local ? 18 : 0, tail = train.carriages * 20;
     const brakingTime = 6;
     const cycle = (train.route.length + tail) / train.speed + dwell + (train.local ? brakingTime : 0) + 12;
-    const t = (time + train.offset) % cycle, arrival = train.stop / train.speed + brakingTime / 2;
+    const arrival = train.stop / train.speed + brakingTime / 2;
+    return { dwell, tail, brakingTime, cycle, arrival };
+}
+
+// Shared illustrative timetable: passenger journeys use these exact events,
+// rather than a second clock that can drift away from the rendered train.
+export function trainStationSchedule(train, time) {
+    if (!train.local) return null;
+    const timing = trainTiming(train);
+    const index = Math.floor((time + train.offset - timing.arrival) / timing.cycle);
+    const arrivalTime = timing.arrival - train.offset + index * timing.cycle;
+    return { ...timing, index, arrivalTime, departureTime: arrivalTime + timing.dwell,
+        nextArrival: arrivalTime + timing.cycle, stopped: time >= arrivalTime && time < arrivalTime + timing.dwell };
+}
+
+export function trainPose(train, time) {
+    const { dwell, brakingTime, cycle, arrival } = trainTiming(train);
+    const t = ((time + train.offset) % cycle + cycle) % cycle;
     const stopped = train.local && t >= arrival && t < arrival + dwell;
     let q = t * train.speed, speed = train.speed;
     if (train.local && t >= arrival - brakingTime) {

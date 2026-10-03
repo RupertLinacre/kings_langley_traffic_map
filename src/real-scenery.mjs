@@ -27,7 +27,7 @@ const segmentDistance = (x, y, a, b) => {
 
 // Only the scenery is procedural. The surveyed road points and junction graph
 // are never changed, even when a new decorative seed is selected.
-export function createScenery(map, seed = 42) {
+export function createScenery(map, seed = 42, { reservedAreas = [] } = {}) {
     const random = randomSource(seed ^ 0x79fe34), infrastructure = new SpatialIndex(), plots = new SpatialIndex();
     const buildings = [], trees = [];
     const schools = SCHOOLS.map(s => ({ ...s, polygon: s.outline.map(([x, y]) => ({ x, y })) }));
@@ -40,6 +40,8 @@ export function createScenery(map, seed = 42) {
         }
     }
     function clear(x, y, radius) {
+        if (reservedAreas.some(area => x + radius > area.left && x - radius < area.right &&
+            y + radius > area.top && y - radius < area.bottom)) return false;
         if (schools.some(s => insidePolygon({ x, y }, s.polygon))) return false;
         for (const item of infrastructure.near(x, y, radius + 5)) if (segmentDistance(x, y, item.a, item.b) < radius + item.clearance) return false;
         for (const item of plots.near(x, y, radius + 25)) if (Math.hypot(item.x - x, item.y - y) < item.radius + radius + 3) return false;

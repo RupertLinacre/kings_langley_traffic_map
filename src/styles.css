@@ -100,7 +100,14 @@ select:hover { border-color: #bcc5ae; }
 .fit-trip { width: 100%; background: var(--paper); font-size: 11px; }
 .fit-trip svg { width: 15px; height: 15px; }
 .reset-trip { display: flex; justify-content: center; width: 100%; min-height: 36px; margin-bottom: -5px; font-size: 10px; }
-.scenario-chooser { display: grid; grid-template-columns: 1fr 1fr 1fr; padding: 3px; gap: 2px; margin-bottom: 10px; border: 1px solid var(--line); border-radius: 7px; background: #f2f3e9; }
+.scenario-chooser { display: grid; grid-template-columns: 1fr 1fr; padding: 3px; gap: 2px; margin-bottom: 10px; border: 1px solid var(--line); border-radius: 7px; background: #f2f3e9; }
+.village-clock { margin: 1px 0 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 7px; background: #f2f3e9; }
+.village-clock > div { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.clock-caption { font-size: 10px; color: #687657; }
+.village-clock time { color: var(--green); font-size: 22px; font-weight: 500; font-variant-numeric: tabular-nums; letter-spacing: -.5px; }
+.village-clock p { margin: 3px 0 0; color: #788369; font-size: 10px; line-height: 1.45; }
+.time-select { margin: 5px 0 12px; }
+.time-select select { height: 38px; font-size: 11px; }
 .scenario-button { min-width: 0; min-height: 37px; padding: 5px 4px; border: 0; border-radius: 4px; color: #667451; background: transparent; font-size: 10px; font-weight: 500; line-height: 1.3; transition: background .15s, color .15s, box-shadow .15s; }
 .scenario-button:hover { background: #e6ebd9; color: #344a30; }
 .scenario-button[aria-pressed="true"] { color: var(--paper); background: var(--green); box-shadow: 0 1px 3px #2b3c3014; }

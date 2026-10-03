@@ -10,7 +10,7 @@
     <link rel="stylesheet" href="./src/styles.css" />
   </head>
   <body class="loading">
-    <canvas id="road-canvas" tabindex="0" aria-label="Interactive living map of Kings Langley. Drag to move, scroll or pinch to zoom. Tap a vehicle, train or walker to follow a journey. Use Little village explorer for accessible discovery controls."></canvas>
+    <canvas id="road-canvas" tabindex="0" aria-label="Interactive living map of Kings Langley. Drag to move, scroll or pinch to zoom. Tap a vehicle, boat, train or walker to follow a journey. Use Little village explorer for accessible discovery controls."></canvas>
 
     <div class="mobile-brand" aria-hidden="true"><span class="brand-mark"></span><div>Kings Langley<span>A living map</span></div></div>
 
@@ -58,6 +58,9 @@
                 <button type="button" data-discover="train"><span aria-hidden="true">▤</span><span>Train spotting<small>Along the real railway</small></span></button>
                 <button type="button" data-discover="cycling"><span aria-hidden="true">↝</span><span>A little bike ride<small>Follow a village cyclist</small></span></button>
                 <button type="button" data-discover="turning"><span aria-hidden="true">↶</span><span>Three-point turn<small>Watch a little demonstration</small></span></button>
+                <button type="button" data-discover="boating"><span aria-hidden="true">≈</span><span>A canal adventure<small>Follow a little narrowboat</small></span></button>
+                <button type="button" data-discover="station"><span aria-hidden="true">⇄</span><span>Meet the train<small>Station drop-offs and pickups</small></span></button>
+                <button type="button" data-discover="school"><span aria-hidden="true">✎</span><span>The school run<small>Cars, children and little backpacks</small></span></button>
               </div>
               <p id="explorer-note" class="explorer-note">Try “Taking turns” to visit Coniston Road and Vicarage Lane.</p>
             </details>
@@ -76,10 +79,17 @@
 
           <section class="control-section" aria-labelledby="rhythm-heading">
             <div class="section-heading"><h2 id="rhythm-heading">Set the rhythm</h2><span class="section-number">02</span></div>
+            <div class="village-clock" aria-label="Village clock">
+              <div><span class="clock-caption">Village time</span><time id="village-time" datetime="10:30">10:30</time></div>
+              <p id="village-day-status">A little day in Kings Langley</p>
+            </div>
+            <label class="field-label" for="time-of-day">Time of day</label>
+            <div class="select-wrap time-select"><select id="time-of-day"><option value="quiet">Early morning</option><option value="school-run">School run</option><option value="everyday" selected>Village life</option><option value="afternoon">School pickup</option><option value="rush">Homeward rush</option><option value="evening">Quiet evening</option></select></div>
             <div class="scenario-chooser" role="group" aria-labelledby="scenario-heading">
               <h3 id="scenario-heading" class="sr-only">Choose the village activity</h3>
               <button class="scenario-button" type="button" data-scenario="quiet" aria-pressed="false">Quiet morning</button>
               <button class="scenario-button" type="button" data-scenario="everyday" aria-pressed="true">Village life</button>
+              <button class="scenario-button" type="button" data-scenario="school-run" aria-pressed="false">School run</button>
               <button class="scenario-button" type="button" data-scenario="rush" aria-pressed="false">Rush hour</button>
             </div>
             <div class="control-line"><label for="simulation-speed">Pace of life</label><div class="select-wrap speed-select"><select id="simulation-speed"><option value="0.5">½× speed</option><option value="1" selected>1× speed</option><option value="2">2× speed</option><option value="4">4× speed</option><option value="8">8× speed</option></select></div></div>
@@ -99,7 +109,7 @@
 
         <details class="about-details">
           <summary>About this little world<svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="8" cy="8" r="5.5" /><path d="M8 7v4M8 4.5v.5" /></svg></summary>
-          <div class="about-content"><p>Real streets, miniature life. Built from OpenStreetMap roads around Kings Langley, with an illustrative traffic simulation and a little imagined scenery.</p><p>Drag to explore. Scroll or pinch to zoom. Select a landmark to find your way, or tap a vehicle to follow its journey.</p><p>With the map focused, use the arrow keys to move, + and − to zoom, and Space to pause. Press Escape to close the journey planner.</p><p>Traffic is simulated and does not represent live road conditions.</p><button id="share-view" class="text-button share-view" type="button"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="m8 12 4-4M7 13l-1 1a3 3 0 0 1-4-4l4-4a3 3 0 0 1 4 0m0 8a3 3 0 0 0 4 0l4-4a3 3 0 0 0-4-4l-1 1" /></svg>Copy view link</button></div>
+          <div class="about-content"><p>Real streets, miniature life. Built from OpenStreetMap roads around Kings Langley, with an illustrative traffic simulation and a little imagined scenery.</p><p>Drag to explore. Scroll or pinch to zoom. Select a landmark to find your way, or tap a vehicle to follow its journey.</p><p>With the map focused, use the arrow keys to move, + and − to zoom, and Space to pause. Press Escape to close the journey planner.</p><p>Bus routes and stops follow <a href="https://www.intalink.org.uk/services" target="_blank" rel="noopener noreferrer">Intalink data</a>. Services from different days run together here, with sped-up departures.</p><p>Traffic is simulated and does not represent live road conditions.</p><button id="share-view" class="text-button share-view" type="button"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="m8 12 4-4M7 13l-1 1a3 3 0 0 1-4-4l4-4a3 3 0 0 1 4 0m0 8a3 3 0 0 0 4 0l4-4a3 3 0 0 0-4-4l-1 1" /></svg>Copy view link</button></div>
         </details>
       </div>
       <footer class="panel-footer"><span class="status-dot"></span><span id="town-state">Waking up the village…</span></footer>
@@ -119,7 +129,7 @@
       <p id="selection-story" class="selection-story"></p>
       <div class="selection-actions"><span id="selection-speed" class="selection-speed"></span><button id="follow-selected" class="button button-primary" type="button" aria-pressed="false"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><circle cx="10" cy="10" r="4" /><path d="M10 2v3M10 15v3M2 10h3M15 10h3" /></svg>Follow</button></div>
     </aside>
-    <p id="map-hint" class="map-hint" title="Choose a vehicle or walker to follow a little journey."><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="m6 3 9 7-5 1-2 5-2-13Z" /></svg>Tap a vehicle or walker to follow along</p>
+    <p id="map-hint" class="map-hint" title="Choose a vehicle, boat or walker to follow a little journey."><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="m6 3 9 7-5 1-2 5-2-13Z" /></svg>Tap a vehicle, boat or walker to follow along</p>
     <p id="app-toast" class="app-toast" role="status" hidden></p>
 
     <div class="status-dock" aria-label="Simulation statistics"><div class="metric"><span class="metric-label"><i class="car-swatch"></i>On the road</span><span id="car-count" class="metric-value">— cars</span></div><div class="metric"><span class="metric-label"><i class="bus-swatch"></i>Village buses</span><span id="bus-count" class="metric-value">— buses</span></div><div class="metric"><span class="metric-label">Traffic flow</span><span id="traffic-state" class="metric-value">Starting</span></div><div class="metric queue-metric"><span class="metric-label">At junctions</span><span id="queue-count" class="metric-value">— waiting</span></div></div>

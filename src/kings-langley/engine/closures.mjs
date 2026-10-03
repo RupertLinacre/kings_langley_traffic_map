@@ -93,7 +93,7 @@ export class Closures {
     for (const c of this.sim.cars) {
       if (c.closureRevision === this.revision) continue;
       // Finish parking/committed single-lane passage before changing its route.
-      if (c.parked || c.turnaround || this.sim.parking.zones.some((z) => z.claims.has(c.id)))
+      if (c.parked || c.parkingActivity || c.purposefulJourney || c.turnaround || c.busPass || this.sim.parking.zones.some((z) => z.claims.has(c.id)))
         continue;
       c.closureRevision = this.revision;
       c.closureBlocked = false;
@@ -162,7 +162,13 @@ export class Closures {
       }
       c.closureBarrierRevision = this.revision;
     }
-    return Math.max(0, c.closureBarrier - c.q);
+    // A newly placed closure cannot strand an already committed overtaker in
+    // the opposite lane. Let it finish only within its reserved return pocket;
+    // the ordinary closure route/barrier is restored immediately after merging.
+    const barrier = c.busPass && c.closureBarrier <= c.busPass.endQ
+      ? c.busPass.endQ
+      : c.closureBarrier;
+    return Math.max(0, barrier - c.q);
   }
   summary() {
     return {

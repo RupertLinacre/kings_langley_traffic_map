@@ -4,6 +4,10 @@ import { drawCyclist } from './real-cyclists.mjs';
 import { pedestrianPose, drawPedestrian, drawPedestrianCrossings } from './real-pedestrians.mjs';
 import { captureMotion, sampleVehicleDistance, sampleMotionTime } from './render-motion.mjs';
 import { drawTrains } from './railway.mjs';
+import { drawCanalBoats, drawCanalLocks } from './canal-boat-art.mjs';
+import { drawBusStops } from './real-bus-art.mjs';
+import { drawStationArea, drawStationPassengers } from './station-art.mjs';
+import { drawJourneyGroups } from './journey-art.mjs';
 
 export class RealMapRenderer {
     constructor(canvas) {
@@ -98,11 +102,9 @@ export class RealMapRenderer {
                         line(g, -2, -1.8, 3, -1.8, '#c1dcd04d', 0.55);
                         line(g, 1, 1.3, 5, 1.3, '#d5e7d666', 0.55); g.restore();
                     }
-                    if (item.tags.lock === 'yes') for (const distance of [2, item.path.length - 2]) {
-                        const p = pathPoint(item.path, distance);
-                        g.save(); g.translate(p.x, p.y); g.rotate(p.angle);
-                        line(g, 0, -5, -2, 0, '#6e7161', 1.3);
-                        line(g, -2, 0, 0, 5, '#6e7161', 1.3); g.restore();
+                    if (item.tags.lock === 'yes') {
+                        strokePath(g, item.path, '#6e7161', 10.5);
+                        strokePath(g, item.path, '#7ba7a8', 8);
                     }
                 }
             } else {
@@ -220,6 +222,8 @@ export class RealMapRenderer {
         for (const layer of this.layers) {
             this.drawContext(g, layer); this.drawRoads(g, layer);
             drawPedestrianCrossings(g, town, roadSize, layer);
+            drawBusStops(g, town, roadSize, layer, (p, margin) => this.visible(p, margin), this.view.scale);
+            drawStationArea(g, town, roadSize, layer, (p, margin) => this.visible(p, margin), this.view.scale);
             if (layer > 0) {
                 const overlay = oldBridges.get(layer) || document.createElement('canvas');
                 if (overlay.width !== this.scenery.width) overlay.width = this.scenery.width;
@@ -229,6 +233,8 @@ export class RealMapRenderer {
                 this.transform(paint); paint.lineCap = 'round'; paint.lineJoin = 'round';
                 this.drawContext(paint, layer); this.drawRoads(paint, layer);
                 drawPedestrianCrossings(paint, town, roadSize, layer);
+                drawBusStops(paint, town, roadSize, layer, (p, margin) => this.visible(p, margin), this.view.scale);
+                drawStationArea(paint, town, roadSize, layer, (p, margin) => this.visible(p, margin), this.view.scale);
                 this.bridges.set(layer, overlay);
             }
         }
@@ -324,7 +330,6 @@ export class RealMapRenderer {
         const time = sampleMotionTime(this.town, alpha, paused);
         this.lastVehiclePoses.clear();
         for (const car of s.cars) {
-            if (car.parked) continue;
             const q = sampleVehicleDistance(this.town, car, alpha, paused);
             const rendered = q === car.q ? car : { ...car, q };
             this.lastVehiclePoses.set(car.id, { car, rendered, p: realVehiclePose(this.town, rendered, this.roadSize, paused ? 1 : alpha) });
@@ -334,6 +339,8 @@ export class RealMapRenderer {
         for (const layer of this.layers) {
             if (this.bridges.has(layer)) this.drawCached(g, this.bridges.get(layer));
             this.transform(g);
+            drawCanalLocks(g, this.town.boats || [], time, layer, p => this.visible(p, 50));
+            drawCanalBoats(g, this.town.boats || [], time, layer, p => this.visible(p, 50));
             drawTrains(g, this.town.trains || [], time, layer, p => this.visible(p, 50));
             if (planning) for (const road of this.map.roads) {
                 if (road.layer !== layer || !this.inView(road.bounds)) continue;
@@ -343,17 +350,18 @@ export class RealMapRenderer {
             g.save(); g.scale(0.5, 0.5);
             for (const { car, p } of cars) {
                 if (p.road.layer !== layer || car.type === 'bicycle') continue;
+                if (car.parked && !car.stationVisit && !s.parking.managesMotion?.(car)) continue;
                 const bus = car.type === 'bus';
                 const current = this.map.data.edges[car.route[car.index]], next = this.map.data.edges[car.route[car.index + 1]];
-                let indicator = car.turnaround ? 1 : 0;
+                let indicator = s.parking.indicator?.(car) || (car.turnaround ? 1 : car.busPass?.phase === 'out' ? 1 : car.busPass?.phase === 'return' ? -1 : 0);
                 if (!indicator && next && current.length - car.d < 35) {
                     const a = position(current, current.length), b = position(next, 0);
                     const angle = Math.atan2(a.dx * b.dy - a.dy * b.dx, a.dx * b.dx + a.dy * b.dy);
                     if (Math.abs(angle) > 0.35) indicator = Math.sign(angle);
                 }
-                drawVehicle(g, { bus, type: car.type, length: car.length * 2, width: car.width * this.factor(p.road) * 2,
+                drawVehicle(g, { bus, type: car.type, length: car.length * 2, width: car.width * (p.station ? 1 : this.factor(p.road)) * 2,
                     colour: bus ? car.busStyle.colour : car.paint, route: car.busStyle, braking: car.v < 1, dwell: car.roadStop?.remaining || 0,
-                    indicator, reversing: car.turnaround?.reversing },
+                    indicator, reversing: car.turnaround?.reversing || car.parkingActivity?.reversing },
                     { x: p.x * 2, y: p.y * 2, angle: p.angle }, time);
             }
             g.restore();
@@ -363,18 +371,25 @@ export class RealMapRenderer {
             for (const { person, pose } of people) {
                 if ((pose.layer || 0) === layer) drawPedestrian(g, person, pose, time);
             }
+            drawStationPassengers(g, this.town, time, this.roadSize, layer, p => this.visible(p, 10), paused ? 1 : alpha);
+            drawJourneyGroups(g, this.town, time, this.roadSize, layer, p => this.visible(p, 10), paused ? 1 : alpha);
         }
         this.transform(g);
         for (const zone of s.parking.zones) {
-            const slots = [...Array.from({ length: zone.baseline }, (_, i) => i), ...[...zone.parked.values()].map(car => car.parked.slot)];
-            for (const slot of slots) {
+            const slots = s.parking.visibleSlots?.(zone) || [...Array.from({ length: zone.baseline }, (_, slot) => ({ slot })),
+                ...[...zone.parked.values()].map(car => ({ slot: car.parked.slot, car }))];
+            for (const item of slots) {
+                const slot = item.slot;
+                if (item.car && s.parking.managesMotion?.(item.car)) continue;
                 const raw = s.parking.parkedPosition(zone, slot);
                 const road = this.map.roadById.get(raw.edge.way);
                 const p = s.parking.parkedPosition(zone, slot, this.factor(road));
                 if (!this.visible(p)) continue;
                 g.save(); g.translate(p.x, p.y); g.scale(0.5, 0.5);
                 const colours = ['#8b9290', '#eee5d4', '#426e82', '#b96851', '#c6a357', '#55766a'];
-                drawVehicle(g, { length: p.length * 2, width: 1.8 * this.factor(road) * 2, colour: colours[(slot + zone.id.length) % colours.length], bus: false, braking: false }, { x: 0, y: 0, angle: Math.atan2(p.dy, p.dx) }, s.time); g.restore();
+                drawVehicle(g, { length: (item.car?.length || item.length || p.length) * 2, width: (item.car?.width || item.width || 1.8) * this.factor(road) * 2,
+                    colour: item.car?.paint || item.colour || colours[(slot + zone.id.length) % colours.length], bus: false, braking: false },
+                    { x: 0, y: 0, angle: item.angle ?? Math.atan2(p.dy, p.dx) + (item.direction === -1 ? Math.PI : 0) }, time); g.restore();
             }
         }
         for (const node of Object.values(this.map.data.nodes)) {

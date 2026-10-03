@@ -200,7 +200,7 @@ function prepareWalking(map, parking) {
 
 export function createPedestrians(town, seed = town.seed) {
     town.people = [];
-    town.walking = { ...prepareWalking(town.map, town.simulation.parking), random: randomSource((seed || 42) ^ 0x70656f70), nextId: 0, time: 0, widthFactor: 2.5 };
+    town.walking = { ...prepareWalking(town.map, town.simulation.parking), random: randomSource((seed || 42) ^ 0x70656f70), nextId: 0, time: 0, widthFactor: 2.5, linked: new Set() };
     return town.walking;
 }
 function planJourney(town, person) {
@@ -222,7 +222,7 @@ export function setPedestrianCount(town, count) {
     count = clamp(Math.round(Number(count) || 0), 0, 400);
     const w = town.walking;
     town.people = town.people.slice(0, count);
-    const alive = new Set(town.people);
+    const alive = new Set([...town.people, ...w.linked]);
     for (const crossing of w.crossings) {
         for (const person of crossing.users) if (!alive.has(person)) crossing.users.delete(person);
         crossing.occupiedEdges = new Set([...crossing.users].flatMap(p => [...(p.crossingLanes || [])]));
@@ -443,6 +443,91 @@ export function pedestrianPose(town, person, widthFactor = 2.5) {
     const progress = person.state === 'gap_middle_wait' && link?.crossing?.kind === 'gap'
         ? gapGeometry(link, widthFactor).waitProgress : person.progress;
     return link ? linkPoint(link, progress, widthFactor) : nodePoint(person.node, widthFactor);
+}
+
+/** A waypoint on an existing permitted pavement, clamped before its junction
+ * trim. Reversed road edges retain the physical pavement side. */
+export function pavementWaypoint(town, edgeId, distance, side = 1) {
+    const section = town.walking?.sections.find(item => item.edges.some(edge => edge.id === edgeId));
+    if (!section?.sides?.has(side)) return null;
+    const edge = town.map.data.edges[edgeId];
+    const points = section.sides.get(side);
+    const d = edge.from === section.edge.from ? distance : section.path.length - distance;
+    return { id: `pavement:${edgeId}:${d}:${side}`, section, side,
+        distance: clamp(d, points[0].distance, points.at(-1).distance), component: points[0].component,
+        links: points.map(to => ({ type: 'walk', from: null, to, length: Math.abs(to.distance - d) })) };
+}
+
+/** Explicit shortest pavement journey. Additional waypoints connect only to
+ * their own pavement; all corners and crossings use the existing safe graph. */
+export function planPavementRoute(town, from, to) {
+    if (!from || !to || from.component !== to.component) return null;
+    const walk = (a, b) => ({ type: 'walk', from: a, to: b, length: Math.max(0.01, Math.abs(a.distance - b.distance)) });
+    if (from.section === to.section && from.side === to.side) return [walk(from, to)];
+    const distances = new Map([[from, 0]]), previous = new Map(), queue = [from];
+    while (queue.length) {
+        queue.sort((a, b) => distances.get(a) - distances.get(b));
+        const node = queue.shift();
+        if (node === to) break;
+        const links = node === from && typeof node.id === 'string'
+            ? node.section.sides.get(node.side).map(next => walk(node, next)) : [...node.links];
+        if (node.section === to.section && node.side === to.side) links.push(walk(node, to));
+        for (const link of links) {
+            const distance = distances.get(node) + link.length;
+            if (distance >= (distances.get(link.to) ?? Infinity)) continue;
+            distances.set(link.to, distance); previous.set(link.to, link); queue.push(link.to);
+        }
+    }
+    if (!previous.has(to)) return null;
+    const route = []; let at = to;
+    while (at !== from) { const link = previous.get(at); if (!link) return null; route.unshift(link); at = link.from; }
+    return route;
+}
+
+export function pavementNodePose(town, node, widthFactor = town.walking.widthFactor) { return nodePoint(node, widthFactor); }
+
+/** Remove a linked walker and every crossing/half-lane claim immediately. */
+export function releaseLinkedWalker(town, person) {
+    if (person.crossing) {
+        releaseLane(person); person.crossing.users.delete(person);
+        if (!person.crossing.users.size) person.crossing.exempt.clear();
+        person.crossing = null;
+    }
+    town.walking?.linked.delete(person);
+}
+
+/** Advance a fixed journey with the same zebra and two-stage gap decisions as
+ * ordinary walkers. It stops at its destination rather than choosing a random
+ * next trip. A family uses one shared controller and a compact walking pose. */
+export function updateLinkedWalker(town, person, dt) {
+    if (!(dt > 0) || person.arrived || !person.route?.length) return;
+    town.walking.linked.add(person);
+    person.previousIndex = person.index; person.previousProgress = person.progress;
+    let remaining = dt;
+    for (let step = 0; step < 24 && remaining > 0; step++) {
+        const link = person.route[person.index];
+        if (!link) break;
+        if (link.type === 'crossing' && !person.crossing) { requestCrossing(town, person, link.crossing); break; }
+        if (link.crossing?.kind === 'gap') {
+            const result = advanceGapCrossing(town, person, link, remaining); remaining = result.remaining;
+            if (!result.complete) { if (remaining > 0) continue; break; }
+        } else {
+            if (person.state === 'crossing_wait') {
+                if (!canEnter(town, person.crossing)) break;
+                person.state = 'crossing'; person.activity = 'Crossing together at the zebra';
+            }
+            const length = link.type === 'crossing' ? pavement(link.from.section.road, town.walking.widthFactor) * 2 : link.length;
+            const required = (1 - person.progress) * length / person.speed;
+            if (remaining < required) { person.progress += remaining * person.speed / length; break; }
+            remaining -= required;
+        }
+        person.node = link.to; person.index++; person.progress = 0;
+        if (person.crossing) releaseLinkedWalker(town, person);
+        person.state = 'walking';
+        if (person.index >= person.route.length) {
+            person.arrived = true; person.state = 'arrived'; releaseLinkedWalker(town, person); break;
+        }
+    }
 }
 export function drawPedestrian(g, person, pose, time) {
     const waiting = ['crossing_wait', 'gap_wait', 'gap_middle_wait'].includes(person.state);

@@ -1,5 +1,8 @@
 import { Closures } from './closures.mjs';
+import { movementsCompatible } from './junction-movements.mjs';
 import { AdaptiveTraffic } from './adaptive-traffic.mjs';
+import { BusOvertaking } from './bus-overtaking.mjs';
+import { applyDriver, createDriver, driverAcceleration, resetDriverResponse } from './driver-behaviour.mjs';
 import { isCirculatory, junction20Signal } from './junction20.mjs';
 import {
   cumulativeWeights,
@@ -54,6 +57,7 @@ export class Simulation {
     this.graph = makeGraph(data);
     this.parking = new Parking(this);
     this.seed = seed;
+    this.driverSeed = seed >>> 0;
     this.time = 0;
     this.cars = [];
     this.completed = 0;
@@ -69,6 +73,8 @@ export class Simulation {
     this.pendingFleet = new Map();
     this.pendingTotal = 0;
     this.reservations = new Map();
+    this.junctionShapes = new Map();
+    this.junctionCompatibility = new Map();
     this.heldSignals = new Set();
     this.cycle = 60;
     this.busShare = null;
@@ -120,6 +126,7 @@ export class Simulation {
     }
     this.closures = new Closures(this);
     this.adaptive = new AdaptiveTraffic(this);
+    this.busOvertaking = new BusOvertaking(this);
     this.routes = this.routeSpecs.map((r) => r.path);
     this.totalRate = this.routeSpecs.reduce((sum, r) => sum + r.rate, 0);
     this.popularityClasses = popularityClasses(data, this.routeSpecs);
@@ -176,9 +183,14 @@ export class Simulation {
       const e = this.data.edges[id],
         next = this.data.edges[path[i + 1]];
       current = Math.min(current, laneCount(e) - 1);
-      if (next?.tags.highway === 'motorway_link') current = 0;
+      if (next?.tags.highway === 'motorway_link' && this.isJunction(e, next)) current = 0;
       return current;
     });
+    // A surveyed shape point is part of the same lane, not an opportunity to
+    // merge sideways. Carry a forthcoming exit-lane choice back through that
+    // continuous corridor so seeded cars cannot jump lanes at its next node.
+    for (let i = path.length - 2; i >= 0; i--)
+      if (!this.isJunction(this.data.edges[path[i]], this.data.edges[path[i + 1]])) lanes[i] = lanes[i + 1];
     let index = 0;
     while (index < path.length - 1 && distance >= offsets[index + 1]) index++;
     const vehicle = {
@@ -202,6 +214,7 @@ export class Simulation {
       counted: new Set(),
       destination: this.data.edges[path.at(-1)].to,
     };
+    applyDriver(vehicle, createDriver(this.driverSeed, vehicle.id, vehicle.type));
     this.parking.prepare(vehicle);
     return vehicle;
   }
@@ -209,20 +222,32 @@ export class Simulation {
     const lanes = new Map();
     for (const c of this.cars) {
       if (c.parked) continue;
-      for (let i = c.index; i >= 0; i--) {
+      // Parking safety can inspect occupancy during the commit loop, before
+      // completed cars are removed. Their front has left the route, but any
+      // rear still on its final edge remains an obstacle for this frame.
+      for (let i = Math.min(c.index, c.route.length - 1); i >= 0; i--) {
         const start = c.q - c.length - c.offsets[i],
           end = c.q - c.offsets[i],
           edge = this.data.edges[c.route[i]];
         if (end <= 0) continue;
         if (start >= edge.length) break;
-        const k = key(edge.id, c.lanes[i]);
-        if (!lanes.has(k)) lanes.set(k, []);
-        lanes.get(k).push({
+        const fragment = {
           start: Math.max(0, start),
           end: Math.min(edge.length, end),
           front: end,
           car: c,
-        });
+        };
+        if (this.busOvertaking.occupiesOwnLane(c)) {
+          const k = key(edge.id, c.lanes[i]);
+          if (!lanes.has(k)) lanes.set(k, []);
+          lanes.get(k).push(fragment);
+        }
+        const opposite = this.busOvertaking.oppositeFragment(c, edge, fragment.start, fragment.end);
+        if (opposite) {
+          const k = key(opposite.edge.id, 0);
+          if (!lanes.has(k)) lanes.set(k, []);
+          lanes.get(k).push({ start: opposite.start, end: opposite.end, front: opposite.end, car: c });
+        }
         if (start >= 0) break;
       }
     }
@@ -235,7 +260,7 @@ export class Simulation {
       const base = c.offsets[i] - startQ;
       if (base > lookahead) break;
       for (const fragment of occupied.get(key(c.route[i], c.lanes[i])) || []) {
-        if (fragment.car === c || base + fragment.end < -0.001) continue;
+        if (fragment.car === c || this.busOvertaking.skipsBus(c, fragment.car) || base + fragment.end < -0.001) continue;
         const gap = base + fragment.start;
         if (gap < nearest.gap)
           nearest = {
@@ -285,27 +310,11 @@ export class Simulation {
     return (
       ins.length > 1 ||
       outs.length > 1 ||
-      laneCount(edge) > 1 ||
-      laneCount(next) > 1
+      laneCount(edge) !== laneCount(next)
     );
   }
   compatible(a, b) {
-    if (a.edge === b.edge && a.next === b.next) return a.lane !== b.lane;
-    const ea = this.data.edges[a.edge],
-      na = this.data.edges[a.next],
-      eb = this.data.edges[b.edge],
-      nb = this.data.edges[b.next];
-    if (na.id === nb.id)
-      return na.tags.highway === 'motorway' && a.lane !== b.lane;
-    const pa = position(ea, ea.length),
-      qa = position(na, Math.min(5, na.length)),
-      pb = position(eb, eb.length),
-      qb = position(nb, Math.min(5, nb.length));
-    return (
-      pa.dx * qa.dx + pa.dy * qa.dy > 0.9 &&
-      pb.dx * qb.dx + pb.dy * qb.dy > 0.9 &&
-      pa.dx * pb.dx + pa.dy * pb.dy < -0.9
-    );
+    return movementsCompatible(this.data, a, b, this.junctionShapes, this.junctionCompatibility);
   }
   priority(edge, next) {
     const ranks = {
@@ -331,40 +340,75 @@ export class Simulation {
       const leader = this.leader(c, occupied, Math.max(250, crossing - c.q));
       return leader.frontGap < crossing - c.q + 0.01;
     };
+    const clearances = new Map();
+    const entryClearance = c => {
+      if (clearances.has(c)) return clearances.get(c);
+      let gap = Math.min(this.leader(c, occupied).gap, this.parking.constraint(c).gap, this.parking.gap?.(c) ?? Infinity,
+        this.closures.gap(c), this.adaptive.gap(c), this.busOvertaking.gap(c));
+      for (let i = c.index; i < c.route.length && c.offsets[i] - c.q < 180; i++) {
+        const edge = this.data.edges[c.route[i]], distance = c.offsets[i + 1] - c.q;
+        gap = Math.min(gap, c.offsets[i] + (this.crossingStop?.(c, edge) ?? Infinity) - c.q);
+        const signal = this.signal(edge);
+        if (signal === 'red' || signal === 'amber') gap = Math.min(gap, distance);
+      }
+      clearances.set(c, gap);
+      return gap;
+    };
+    const plannedStop = c => c.roadStop && !c.roadStop.done
+      ? (c.roadStop.remaining !== null ? c.q : c.roadStop.q) : Infinity;
     for (const [node, claims] of this.reservations) {
       const alive = claims.filter(
         (r) =>
           this.cars.includes(r.car) &&
           !r.car.parked && !r.car.turnaround &&
+          (!this.parking.managesMotion(r.car) || r.car.q >= r.crossing) &&
           r.car.q < r.crossing + r.car.length + 0.5 &&
-          !(r.car.q < r.crossing && hasLeader(r.car, r.crossing)) &&
-          this.parking.constraint(r.car).gap >= r.crossing - r.car.q &&
+          // An entered body still owns its crossing. An unused approach claim
+          // must not hold other traffic while its driver waits at a bus stop,
+          // pedestrian crossing, red light or blocked exit before the junction.
           (r.car.q >= r.crossing ||
-            Math.min(this.closures.gap(r.car), this.adaptive.gap(r.car)) > r.crossing - r.car.q),
+            (plannedStop(r.car) > r.crossing && !hasLeader(r.car, r.crossing) &&
+              entryClearance(r.car) >= r.crossing - r.car.q + (r.circulating ? 0 : r.car.length) + r.car.minGap + 0.5)),
       );
       if (alive.length) this.reservations.set(node, alive);
       else this.reservations.delete(node);
     }
     const requests = [];
     for (const c of this.cars) {
-      if (c.parked || c.turnaround) continue;
+      if (c.parked || c.turnaround || this.parking.managesMotion(c)) continue;
       const chain = [];
-      let horizon = Math.max(25, c.length + 8, c.v * 2);
+      let ringHorizon = null;
+      let incomplete = false;
+      const blockedAt = distance => {
+        if (chain.length && distance - (chain.at(-1).crossing - c.q) < c.length + c.minGap + 1) incomplete = true;
+      };
+      // Notice an approaching circulating car early enough to give way: at
+      // eight metres/second, a 25 m horizon otherwise lets a stopped entrant
+      // take the empty crossing just before the circulating driver is seen.
+      const circulatingApproach = isCirculatory(this.data.edges[c.route[c.index]].tags);
+      let horizon = Math.max(25, c.length + 8, c.v * (circulatingApproach ? 4 : 2));
       for (let i = c.index; i < c.route.length - 1; i++) {
         const edge = this.data.edges[c.route[i]],
           next = this.data.edges[c.route[i + 1]],
           distance = c.offsets[i + 1] - c.q;
-        if (
-          distance > horizon ||
-          this.parking.constraint(c).gap < distance ||
-          Math.min(this.closures.gap(c), this.adaptive.gap(c)) <= distance
-        )
-          break;
+        const circulating = isCirculatory(edge.tags) && isCirculatory(next.tags) &&
+          laneCount(edge) === laneCount(next) && c.lanes[i] === c.lanes[i + 1];
+        const enteringCircle = !isCirculatory(edge.tags) && isCirculatory(next.tags);
+        if (distance > horizon) break;
+        // A scheduled stop may legitimately be just beyond a junction. Let the
+        // driver reach it and hold the crossing only while its body is there;
+        // demanding a whole bus length beyond every stop would make it
+        // impossible to reach several real village bus stops.
+        if (plannedStop(c) <= c.offsets[i + 1]) break;
+        // Once on a roundabout, follow the next car around the same lane.
+        // Requiring a whole empty vehicle length at every mapped entrance can
+        // make a packed ring wait for itself forever. Joining and exiting cars
+        // still need enough space to clear their crossing completely.
+        if (entryClearance(c) < distance + (circulating ? 0 : c.length) + c.minGap + 0.5) { blockedAt(distance); break; }
         if (!this.isJunction(edge, next)) continue;
         const state = this.signal(edge);
-        if (state === 'red' || state === 'amber') break;
-        if (this.data.nodes[edge.to].tags.highway === 'stop' && c.stopped < 1)
-          break;
+        if (state === 'red' || state === 'amber') { blockedAt(distance); break; }
+        if (this.data.nodes[edge.to].tags.highway === 'stop' && c.stopped < 1) { blockedAt(distance); break; }
         const downstream = this.leader(
           c,
           occupied,
@@ -372,19 +416,30 @@ export class Simulation {
           i + 1,
           c.offsets[i + 1],
         );
-        if (downstream.gap < c.length + 3) break;
+        if (downstream.gap < (circulating ? c.minGap + 0.5 : c.length + 3)) { blockedAt(distance); break; }
         horizon = Math.max(horizon, distance + c.length + 5);
         chain.push({
           car: c,
           edge: edge.id,
           next: next.id,
           lane: c.lanes[i + 1],
+          fromLane: c.lanes[i],
+          circulating,
           crossing: c.offsets[i + 1],
           priority: this.priority(edge, next),
           eta: distance / Math.max(2, c.v),
         });
+        // Ring entries remain give-way claims, but must not ask for an atomic
+        // reservation of the entire circle. Include only nodes inside the
+        // first crossing's front-stop buffer: J20 has successive junctions
+        // under three metres apart, so stopping for the second unclaimed node
+        // can otherwise prevent the nose ever reaching the first claimed one.
+        // Do not extend this window at each node, which would recreate a
+        // circular wait on a close-spaced roundabout.
+        if (circulating || enteringCircle) ringHorizon ??= distance + c.minGap + 1;
+        if (ringHorizon !== null) horizon = ringHorizon;
       }
-      if (chain.length && !chain.some((r) => hasLeader(c, r.crossing)))
+      if (chain.length && !incomplete && !chain.some((r) => hasLeader(c, r.crossing)))
         requests.push(chain);
     }
     requests.sort(
@@ -395,24 +450,11 @@ export class Simulation {
         a[0].car.id - b[0].car.id,
     );
     for (const chain of requests) {
-      // Reserve closely spaced OSM junction nodes atomically. Otherwise a bus
-      // can stop before a two-metre connector while waiting to reserve its end.
-      const shortConnectors = (claim) =>
-        [claim.edge, claim.next]
-          .map((id) => this.data.edges[id])
-          .filter((e) => e.length < 15);
-      const opposingConnector = (a, b) =>
-        shortConnectors(a).some((e) =>
-          shortConnectors(b).some(
-            (f) => e.from === f.to && e.to === f.from && e.way === f.way,
-          ),
-        );
-      const activeClaims = [...this.reservations.values()].flat();
+      // Acquire every close junction together. Opposite directions on a short
+      // two-way shape edge are separate lanes; conflicts belong to the actual
+      // movements at either end, not to the mere presence of that connector.
       const feasible = chain.every(
         (r) =>
-          activeClaims.every(
-            (x) => x.car === r.car || !opposingConnector(r, x),
-          ) &&
           (this.reservations.get(this.data.edges[r.edge].to) || []).every(
             (x) => x.car === r.car || this.compatible(r, x),
           ),
@@ -475,7 +517,7 @@ export class Simulation {
         continue;
       const edge = this.data.edges[c.route[c.index]];
       c.v = Math.min(edge.speed, c.maxSpeed) * 0.65;
-      if (this.crossingSpawnAllowed?.(c) === false || !this.adaptive.spawnAllowed(c)) continue;
+      if (this.crossingSpawnAllowed?.(c) === false || !this.adaptive.spawnAllowed(c) || !this.parking.spawnAllowed(c) || !this.busOvertaking.spawnAllowed(c)) continue;
       const spans = [];
       for (
         let j = c.index;
@@ -509,17 +551,17 @@ export class Simulation {
     this.scheduled.push(...events);
     this.scheduled.sort((a, b) => a.at - b.at);
   }
-  enqueue(id, type) {
+  enqueue(id, type, driver = null) {
     this.pending.set(id, (this.pending.get(id) || 0) + 1);
     if (!this.pendingFleet.has(id)) this.pendingFleet.set(id, []);
-    this.pendingFleet.get(id).push(type);
+    this.pendingFleet.get(id).push(driver ? { type, driver } : type);
     this.pendingTotal++;
     this.generated++;
   }
   arrivals(dt, multiplier) {
     while (this.scheduled.length && this.scheduled[0].at <= this.time) {
       const event = this.scheduled.shift();
-      this.enqueue(event.route, event.type);
+      this.enqueue(event.route, event.type, event.driver);
     }
     if (this.totalRate <= 0) return;
     this.arrivalBudget -= ((this.totalRate * multiplier) / 3600) * dt;
@@ -535,7 +577,8 @@ export class Simulation {
       if (!count) continue;
       const original = this.closures.entry(id);
       if (!original) continue;
-      const type = this.pendingFleet.get(id)[0],
+      const ticket = this.pendingFleet.get(id)[0],
+        type = typeof ticket === 'string' ? ticket : ticket.type,
         spec = this.adaptive.entry(original, type),
         edge = this.data.edges[spec.path[0]];
       let inserted = false;
@@ -543,8 +586,9 @@ export class Simulation {
       for (let i = 0; i < laneCount(edge); i++) {
         const lane = (first + i) % laneCount(edge),
           c = this.createVehicle(spec.path, type, VEHICLES[type].length, lane);
+        if (ticket.driver) applyDriver(c, ticket.driver);
         if (c.q >= c.offsets.at(-1)) continue;
-        if (this.crossingSpawnAllowed?.(c) === false || !this.adaptive.spawnAllowed(c) || !this.parking.spawnAllowed(c)) continue;
+        if (this.crossingSpawnAllowed?.(c) === false || !this.adaptive.spawnAllowed(c) || !this.parking.spawnAllowed(c) || !this.busOvertaking.spawnAllowed(c)) continue;
         const leader = this.leader(c, occupied);
         if (leader.gap < 3) continue;
         let intersects = false;
@@ -602,7 +646,7 @@ export class Simulation {
   changeLanes(occupied) {
     for (const c of this.cars) {
       if (
-        c.parked || c.turnaround ||
+        c.parked || c.parkingActivity || c.turnaround || c.busPass ||
         c.parkingPassages.some(
           (p) => p.zone.narrow && c.q > p.entry - 30 && c.q < p.exit + 20,
         )
@@ -620,6 +664,10 @@ export class Simulation {
           old.gap,
           old.v,
         );
+      const previousLanes = c.lanes;
+      let continuation = c.index;
+      while (continuation + 1 < c.route.length &&
+        !this.isJunction(this.data.edges[c.route[continuation]], this.data.edges[c.route[continuation + 1]])) continuation++;
       for (const target of [lane - 1, lane + 1]) {
         if (target < 0 || target >= laneCount(edge)) continue;
         const traffic = occupied.get(key(edge.id, target)) || [];
@@ -631,7 +679,11 @@ export class Simulation {
           )
         )
           continue;
-        c.lanes[c.index] = target;
+        // Evaluate the lane change on every following shape edge as well as
+        // this one. Otherwise a link or signal shape point silently merges a
+        // passing car back into its old lane, without a real junction claim.
+        c.lanes = previousLanes.slice();
+        for (let i = c.index; i <= continuation; i++) c.lanes[i] = target;
         const next = this.leader(c, occupied),
           advantage =
             idmAcceleration(
@@ -641,15 +693,10 @@ export class Simulation {
               next.v,
             ) - base;
         if (advantage > 0.4 || (target < lane && advantage > -0.05)) {
-          for (let j = c.index + 1; j < c.route.length; j++) {
-            const e = this.data.edges[c.route[j]];
-            if (e.tags.highway.endsWith('_link')) break;
-            c.lanes[j] = Math.min(target, laneCount(e) - 1);
-          }
           occupied = this.occupancy();
           break;
         }
-        c.lanes[c.index] = lane;
+        c.lanes = previousLanes;
       }
     }
     return occupied;
@@ -671,10 +718,15 @@ export class Simulation {
     }
     this.parking.update(dt, occupied);
     occupied = this.occupancy();
+    this.busOvertaking.update(dt, occupied);
+    occupied = this.occupancy();
     this.reserve(occupied);
     const updates = [];
     for (const c of this.cars) {
-      if (c.parked || (c.turnaround && !c.turnaround.preparing)) continue;
+      if (c.parked || this.parking.managesMotion(c) || (c.turnaround && !c.turnaround.preparing)) {
+        resetDriverResponse(c);
+        continue;
+      }
       // A driver finding full bays carries on instead of waiting inside the
       // single-track section and trapping the parked cars that must leave first.
       if (
@@ -697,11 +749,12 @@ export class Simulation {
         desired =
           Math.min(
             c.maxSpeed,
+            this.busOvertaking.speed(c),
             restriction.speed,
             edge.speed * c.desiredFactor,
             isCirculatory(edge.tags) ? 8 : Infinity,
           ) * (this.overrides.get(edge.id) || 1);
-      const diversionGap = Math.min(this.closures.gap(c), this.adaptive.gap(c));
+      const diversionGap = Math.min(this.closures.gap(c), this.adaptive.gap(c), this.busOvertaking.gap(c), this.parking.gap?.(c) ?? Infinity);
       let gap = Math.min(leader.gap, restriction.gap, diversionGap),
         leaderSpeed =
           restriction.gap < leader.gap || diversionGap < leader.gap
@@ -728,8 +781,11 @@ export class Simulation {
         }
         {
           const next = this.data.edges[c.route[i + 1]];
+          const stopBeforeJunction = c.roadStop && !c.roadStop.done && c.roadStop.remaining === null &&
+            c.roadStop.q >= c.q && c.roadStop.q < c.offsets[i + 1];
           if (
             this.isJunction(e, next) &&
+            !stopBeforeJunction &&
             !(this.reservations.get(e.to) || []).some((r) => r.car === c) &&
             distance < gap
           ) {
@@ -740,6 +796,7 @@ export class Simulation {
       }
       const stop = c.roadStop && !c.roadStop.done ? c.roadStop : null;
       if (stop && stop.remaining !== null) {
+        resetDriverResponse(c);
         updates.push({ c, move: 0, v: 0, desired });
         continue;
       }
@@ -748,7 +805,8 @@ export class Simulation {
         gap = stopDistance + c.minGap;
         leaderSpeed = 0;
       }
-      const acc = idmAcceleration(c, desired, gap, leaderSpeed),
+      const immediateAcceleration = idmAcceleration(c, desired, gap, leaderSpeed),
+        acc = driverAcceleration(c, immediateAcceleration, this.time, stopDistance < 8 || c.turnaround?.preparing),
         result = integrate(c.v, acc, dt);
       const move = Math.max(0, Math.min(result.move, gap - 0.25, stopDistance));
       updates.push({
@@ -767,7 +825,7 @@ export class Simulation {
       if (stop && !stop.done) {
         if (stop.remaining !== null) {
           stop.remaining = Math.max(0, stop.remaining - dt);
-          if (stop.remaining < 1e-8) {
+          if (stop.remaining < 1e-8 && !this.busOvertaking.busHeld(c)) {
             stop.remaining = 0;
             stop.done = true;
           }
@@ -801,6 +859,7 @@ export class Simulation {
               at: Math.max(this.time + dt + spec.dwell, spec.releaseAfter || 0),
               route: spec.returnRoute,
               type: c.type,
+              driver: c.driver,
             },
           ]);
         finished.add(c.id);

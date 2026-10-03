@@ -8,7 +8,12 @@ import { SCENARIOS, scenarioFor, readViewState, writeViewState } from './view-st
 import { savePostcard } from './postcard.mjs';
 import { pedestrianPose } from './real-pedestrians.mjs';
 import { trainPose, trackPoint } from './railway.mjs';
+import { canalBoatPose } from './canal-boats.mjs';
+import { stationPassengerPose } from './station-visits.mjs';
+import { stationArtGeometry } from './station-art.mjs';
 import { vehicleStory } from './village-stories.mjs';
+import { DAY_PERIODS, villageClock, setVillagePeriod } from './village-day.mjs';
+import { groupPose } from './purposeful-journeys.mjs';
 import { stageParkingVisit } from './village-visits.mjs';
 import { stageTurnDemonstration } from './turn-demonstration.mjs';
 import { turnaroundFits } from './kings-langley/engine/adaptive-traffic.mjs';
@@ -17,6 +22,7 @@ const $ = id => document.getElementById(id);
 const canvas = $('road-canvas');
 const speed = $('simulation-speed'), traffic = $('traffic-level'), width = $('road-size'), zoom = $('town-zoom');
 const cyclists = $('cyclist-count'), people = $('people-count');
+const timeOfDay = $('time-of-day');
 const motionPreference = matchMedia('(prefers-reduced-motion: reduce)');
 let renderer, camera, map, demand, town, scenery;
 let paused = motionPreference.matches, planning = false, origin = null, destination = null, trip = null;
@@ -52,6 +58,13 @@ function updateLabels() {
     document.body.classList.toggle('town-paused', paused);
     if (!town) return;
     const metrics = town.metrics;
+    const clock = villageClock(town);
+    $('village-time').textContent = clock.label;
+    $('village-time').dateTime = clock.label;
+    timeOfDay.value = clock.period;
+    const journeys = town.purposefulJourneys;
+    $('village-day-status').textContent = journeys?.generation === clock.generation &&
+        journeys.periodKey?.endsWith(`:${clock.period}`) ? journeys.status : DAY_PERIODS[clock.period].label;
     $('bus-count').textContent = `${metrics.buses} buses`;
     $('car-count').textContent = `${Math.max(0, metrics.cars - metrics.buses)} other vehicles`;
     $('traffic-state').textContent = metrics.status;
@@ -67,7 +80,7 @@ function updateLabels() {
     zoom.setAttribute('aria-valuetext', $('zoom-value').textContent);
     width.setAttribute('aria-valuetext', `${Number(width.value) / 100} times road width`);
     traffic.setAttribute('aria-valuetext', `${traffic.value} percent; ${metrics.cars} vehicles`);
-    const scenario = scenarioFor(Number(traffic.value), Number(cyclists.value), Number(people.value));
+    const scenario = scenarioFor(Number(traffic.value), Number(cyclists.value), Number(people.value), clock.period);
     for (const button of document.querySelectorAll('[data-scenario]')) button.setAttribute('aria-pressed', String(button.dataset.scenario === scenario));
     if ($('map-scale')) {
         const metres = 100 / camera.view.scale;
@@ -172,14 +185,16 @@ function resetTrip() {
     calculateTrip(); requestDraw();
 }
 
-function startTraffic(seed = newSeed()) {
+function startTraffic(seed = newSeed(), initialMinutes) {
     clearSelection();
     currentSeed = seed;
-    town = createRealTown(map, demand, seed, { cyclists: Number(cyclists.value), pedestrians: Number(people.value) });
+    town = createRealTown(map, demand, seed, { cyclists: Number(cyclists.value), pedestrians: Number(people.value),
+        period: timeOfDay.value, initialMinutes });
     town.walking.widthFactor = Number(width.value) / 100;
     acceptedRoadWidth = town.walking.widthFactor;
     setRealTraffic(town, Number(traffic.value) / 100);
-    scenery = createScenery(map, seed);
+    const stationArea = stationArtGeometry(town)?.bounds;
+    scenery = createScenery(map, seed, { reservedAreas: stationArea ? [stationArea] : [] });
     for (let i = 0; i < 30; i++) updateRealTown(town, 0.1);
     lastMetrics = -1; cacheDirty = true;
     resetTrip(); syncAnimation();
@@ -205,9 +220,29 @@ function selectMapPoint(point) {
         const nearby = town.people.map(person => ({ person, p: pedestrianPose(town, person, Number(width.value) / 100) }))
             .filter(({ p }) => distance(p) < 11 / camera.view.scale).sort((a, b) => distance(a.p) - distance(b.p));
         const carDistance = vehicle ? distance(renderer.lastVehiclePoses.get(vehicle.id).p) : Infinity;
-        if (nearby.length && distance(nearby[0].p) < carDistance) selectOther({ kind: 'person', id: nearby[0].person.id });
+        const passenger = (town.stationVisits?.passengers || []).map(person => ({ person,
+            p: stationPassengerPose(town, person, Number(width.value) / 100, paused ? 1 : accumulator / 0.1) }))
+            .filter(({ p }) => p.visible && distance(p) < 11 / camera.view.scale)
+            .sort((a, b) => distance(a.p) - distance(b.p))[0];
+        const family = (town.purposefulJourneys?.groups || []).map(group => ({ group,
+            p: groupPose(town, group, Number(width.value) / 100, paused ? 1 : accumulator / 0.1) }))
+            .filter(({ p }) => p?.visible !== false && p && distance(p) < 13 / camera.view.scale)
+            .sort((a, b) => distance(a.p) - distance(b.p))[0];
+        if (family && distance(family.p) < carDistance && (!passenger || distance(family.p) < distance(passenger.p)) &&
+            (!nearby.length || distance(family.p) < distance(nearby[0].p))) selectOther({ kind: 'family', id: family.group.id });
+        else if (passenger && distance(passenger.p) < carDistance && (!nearby.length || distance(passenger.p) < distance(nearby[0].p)))
+            selectOther({ kind: 'passenger', id: passenger.person.id });
+        else if (nearby.length && distance(nearby[0].p) < carDistance) selectOther({ kind: 'person', id: nearby[0].person.id });
         else if (vehicle) selectVehicle(vehicle);
         else {
+            const boat = town.boats.map(boat => ({ boat, p: canalBoatPose(boat, sampleMotionTime(town, accumulator / 0.1, paused)) }))
+                .filter(({ boat, p }) => {
+                    if (!p.visible) return false;
+                    const dx = point[0] - p.x, dy = point[1] - p.y, margin = 5 / camera.view.scale;
+                    return Math.abs(dx * Math.cos(p.angle) + dy * Math.sin(p.angle)) < boat.length / 2 + margin &&
+                        Math.abs(-dx * Math.sin(p.angle) + dy * Math.cos(p.angle)) < boat.width / 2 + margin;
+                }).sort((a, b) => distance(a.p) - distance(b.p))[0]?.boat;
+            if (boat) { selectOther({ kind: 'boat', id: boat.id }); return; }
             const train = town.trains.find(train => {
                 const head = trainPose(train, town.simulation.time);
                 return Array.from({ length: train.carriages }, (_, i) => head.q - i * 20)
@@ -266,7 +301,7 @@ function selectVehicle(vehicle, follow = false) {
 }
 
 function showSelection(follow) {
-    $('follow-selected').hidden = selectedOther?.kind === 'place';
+    $('follow-selected').hidden = ['place', 'station'].includes(selectedOther?.kind);
     $('selection-panel').hidden = false;
     $('map-hint').hidden = true;
     document.body.classList.add('vehicle-selected');
@@ -294,13 +329,48 @@ function updateOtherSelection(alpha) {
         title = 'A village wanderer'; description = p.road.tags.name || 'Along a village pavement';
         story = person.activity || 'Off for a little walk around the village.';
         status = person.state.includes('wait') ? 'Looking and waiting' : person.pause ? 'A little rest' : 'One step at a time';
+    } else if (target.kind === 'family') {
+        const group = town.purposefulJourneys?.groups.find(group => group.id === target.id);
+        p = group && groupPose(town, group, Number(width.value) / 100, paused ? 1 : alpha);
+        if (!p || p.visible === false) { clearSelection(); return; }
+        title = group.label || 'A village family';
+        description = group.trip?.school?.name || 'A purposeful village walk';
+        story = group.activity || 'Walking together, from the car to the school gates.';
+        status = group.walker?.state?.includes('wait') ? 'Waiting together for a safe crossing' : 'A little walk together';
+    } else if (target.kind === 'passenger') {
+        const person = town.stationVisits?.passengers.find(person => person.id === target.id);
+        if (!person) { clearSelection(); return; }
+        p = stationPassengerPose(town, person, Number(width.value) / 100, paused ? 1 : alpha);
+        if (!p.visible) { clearSelection(); return; }
+        title = person.kind === 'pickup' ? 'Home from the train' : 'Off to catch the train';
+        description = 'Kings Langley station';
+        story = person.kind === 'pickup' ? 'The train has arrived. Time for a little walk to the car and a lift home.' :
+            'Dropped off at the station. A little walk, then a wait for the next local train.';
+        status = { 'waiting-train': 'Waiting on the platform', boarding: 'Hopping aboard the train',
+            alighting: 'Getting off the train', 'waiting-car': 'Waiting for a lift', 'boarding-car': 'Getting into the car' }[person.phase] || 'Walking through the station';
     } else if (target.kind === 'train') {
         const train = town.trains.find(train => train.id === target.id);
         p = trainPose(train, sampleMotionTime(town, alpha, paused));
         title = train.local ? 'The village train' : 'An express train'; description = 'West Coast Main Line';
-        story = p.stopped ? 'A stop at Kings Langley station. Time to hop aboard!' : 'Four carriages following the real railway through the village.';
+        story = p.stopped ? 'A stop at Kings Langley station. People hop aboard, while arriving passengers head to their waiting lifts.' : 'Four carriages following the real railway through the village.';
         status = p.stopped ? 'At the station' : 'Rolling along the railway';
         if (p.q > train.route.length + 60) { clearSelection(); notify('The train has left the village. Another will be along soon.'); return; }
+    } else if (target.kind === 'station') {
+        const station = town.stationVisits;
+        p = { x: target.p[0], y: target.p[1] };
+        title = 'Kings Langley station'; description = 'Cars and trains share the same clock';
+        story = 'A lift to the station, then a little walk to the train. Arriving passengers head back to the waiting cars.';
+        status = town.trafficLevel === 0 ? 'Add road traffic to see station trips' : station?.status || 'Waiting for the next local train';
+    } else if (target.kind === 'boat') {
+        const boat = town.boats.find(boat => boat.id === target.id);
+        if (!boat) { clearSelection(); return; }
+        p = canalBoatPose(boat, sampleMotionTime(town, alpha, paused));
+        if (!p.visible) { clearSelection(); notify('The narrowboat has left our little map. More will be along soon.'); return; }
+        title = `Narrowboat ${boat.name}`;
+        description = p.lockName ? `Grand Union Canal · ${p.lockName}` : 'Grand Union Canal';
+        story = p.lockName ? `Near ${p.lockName}. Watch the gates swing open as the little narrowboat approaches.` :
+            'A little home on the water. Spot the tiny skipper and the ripples following the boat!';
+        status = `${(p.speed * 2.23694).toFixed(1)} mph · cruising gently`;
     } else {
         p = { x: target.p[0], y: target.p[1] }; title = target.title;
         description = 'Parked cars make the road narrower'; story = target.story; status = 'Two directions. Taking turns.';
@@ -320,8 +390,8 @@ function updateSelection(alpha) {
     if (selectedOther) { updateOtherSelection(alpha); return; }
     if (selectedVehicleId === null) return;
     const vehicle = town.simulation.cars.find(car => car.id === selectedVehicleId);
-    if (!vehicle || vehicle.parked) {
-        clearSelection(); notify(vehicle?.parked ? 'Journey complete. Time to park.' : 'That journey has reached the edge of our little world.');
+    if (!vehicle) {
+        clearSelection(); notify('That journey has reached the edge of our little world.');
         return;
     }
     const q = sampleVehicleDistance(town, vehicle, alpha, paused);
@@ -332,20 +402,41 @@ function updateSelection(alpha) {
     if (lastInspection < 0 || town.simulation.time - lastInspection > 0.4) {
         const newlySelected = lastInspection < 0;
         lastInspection = town.simulation.time;
-        $('selection-title').textContent = vehicle.demonstration ? 'Three-point turn' : vehicle.type === 'bus' ? `Village bus ${vehicle.busStyle.number}` :
-            vehicle.type === 'bicycle' ? 'A village cyclist' : { car: 'A little car', van: 'A village van', lorry: 'A passing lorry' }[vehicle.type] || 'A village journey';
+        $('selection-title').textContent = vehicle.purposefulJourney?.label || (vehicle.stationVisit ? vehicle.stationVisit.kind === 'pickup' ? 'A station pickup' : 'A lift to the train' :
+            vehicle.demonstration ? 'Three-point turn' : vehicle.type === 'bus' ? `Bus ${vehicle.busService?.number || vehicle.busStyle.number}` :
+            vehicle.type === 'bicycle' ? 'A village cyclist' : { car: 'A little car', van: 'A village van', lorry: 'A passing lorry' }[vehicle.type] || 'A village journey');
         $('selection-description').textContent = pose.edge.tags.name || (pose.edge.tags.highway === 'motorway' ? 'On the M25' : 'On a village lane');
+        if (vehicle.stationVisit) $('selection-description').textContent = 'Kings Langley station';
+        if (vehicle.busService) $('selection-description').textContent = `To ${vehicle.busService.destination} · ${$('selection-description').textContent}`;
         if (vehicle.demonstration) $('selection-description').textContent += ' · a little demonstration';
+        if (vehicle.driver && vehicle.type === 'car') $('selection-description').textContent += ` · ${vehicle.driver.label.toLowerCase()} driver`;
         $('selection-story').textContent = vehicleStory(town, vehicle);
         const mph = Math.round(vehicle.v * 2.23694);
-        $('selection-speed').textContent = vehicle.turnaround ? vehicle.turnaround.phase : mph > 0 ? `${mph} mph · ${vehicle.type === 'bicycle' ? 'pedalling along' : 'on the move'}` : 'Waiting a moment';
+        const busDwell = vehicle.roadStop?.busStopId && !vehicle.roadStop.done && vehicle.roadStop.remaining !== null;
+        const busHeld = vehicle.type === 'bus' && town.simulation.busOvertaking.busHeld(vehicle);
+        const stationStatus = { 'pulling-in': 'Pulling into a station bay', unloading: 'Passengers getting out',
+            waiting: 'Waiting for the train passengers', 'ready-to-leave': 'Checking for a clear way out',
+            'turning-in-bay': 'Turning in the station forecourt', 'pulling-out': 'Pulling out carefully' }[vehicle.stationVisit?.phase];
+        const parkingStatus = vehicle.parkingActivity ? { 'reverse-in': 'Reversing into the space',
+            'merge-out': 'Leaving the space' }[vehicle.parkingActivity.phase] : vehicle.parked ?
+            vehicle.roadStop?.remaining === 0 ? 'Waiting for a safe gap to leave' : 'Parked for a visit' :
+            vehicle.parkingSearch && ['searching', 'full'].includes(vehicle.parkingSearch.state) ? 'Looking for a parking space' : null;
+        $('selection-speed').textContent = parkingStatus || stationStatus || (busHeld ? 'Waiting for the passing car' : busDwell ? 'At the bus stop · passengers boarding' : vehicle.busPass ? `${mph} mph · passing a stopped bus` :
+            vehicle.turnaround ? vehicle.turnaround.phase : mph > 0 ? `${mph} mph · ${vehicle.type === 'bicycle' ? 'pedalling along' : 'on the move'}` : 'Waiting a moment');
         if (newlySelected) $('town-status').textContent = `${$('selection-title').textContent} selected. ${following ? 'Following its journey.' : 'Vehicle details are open.'}`;
     }
 }
 
 function discover(kind) {
     let note;
-    if (kind === 'parking') {
+    if (kind === 'school') {
+        applyScenario('school-run');
+        focusPlace('common');
+        camera.zoomAt(camera.scaleAt(150));
+        requestDraw(true);
+        note = 'Watch the school gates. Parents arrive by car, walk with their children, then head on to work or home.';
+        if (paused) notify('Press Resume to watch the school run.');
+    } else if (kind === 'parking') {
         const id = parkingVisit++ % 2 ? 'vicarage' : 'coniston';
         const place = map.landmarks.find(place => place.id === id);
         note = id === 'coniston' ? 'Parked cars line the northwest side. Watch drivers wait for a turn through the gap.' :
@@ -373,6 +464,21 @@ function discover(kind) {
         if (!person) { notify('Add some people with the People walking slider first.'); return; }
         selectOther({ kind: 'person', id: person.id }, true);
         note = 'Watch them look for a gap, cross one lane, and check the next lane.';
+    } else if (kind === 'station') {
+        const station = map.landmarks.find(place => place.id === 'station');
+        const p = [station.p[0] - 30, station.p[1] - 20];
+        selectOther({ kind: 'station', p }, false);
+        camera.focus(p, 140); $('place-focus').value = 'station'; requestDraw(true);
+        note = 'Watch the station bays. Cars drop people off before a local train, then collect passengers who have just arrived.';
+    } else if (kind === 'boating') {
+        const centre = camera.worldAt(...camera.centre);
+        const boat = town.boats.map(boat => ({ boat, p: canalBoatPose(boat, town.simulation.time) }))
+            .filter(({ p }) => p.visible).sort((a, b) => Math.hypot(a.p.x - centre[0], a.p.y - centre[1]) -
+                Math.hypot(b.p.x - centre[0], b.p.y - centre[1]))[0]?.boat;
+        if (!boat) { notify('The next narrowboat will be along soon.'); return; }
+        selectOther({ kind: 'boat', id: boat.id }, true);
+        camera.zoomAt(camera.scaleAt(140));
+        note = 'Life in the slow lane! Follow a colourful narrowboat along the real Grand Union Canal.';
     } else {
         const train = town.trains.find(train => trainPose(train, town.simulation.time).q < train.route.length) || town.trains[0];
         if (!train) return;
@@ -384,11 +490,11 @@ function discover(kind) {
 
 function followBus() {
     const centre = camera.worldAt(...camera.centre);
-    const candidates = town.simulation.cars.filter(car => car.type === 'bus' && !car.parked).map(car => {
+    const candidates = town.simulation.cars.filter(car => car.type === 'bus' && car.busService && !car.parked).map(car => {
         const pose = realVehiclePose(town, car, Number(width.value) / 100);
         return { car, distance: Math.hypot(pose.x - centre[0], pose.y - centre[1]) };
     }).sort((a, b) => a.distance - b.distance);
-    if (!candidates.length) { notify('No buses out just now. Try adding a little more traffic.'); return; }
+    if (!candidates.length) { notify('No buses in the village just now. The next service will be along soon.'); return; }
     selectVehicle(candidates[0].car, true);
 }
 
@@ -397,6 +503,7 @@ function applyScenario(key) {
     traffic.value = scenario.traffic; cyclists.value = scenario.cyclists; people.value = scenario.pedestrians;
     setRealTraffic(town, scenario.traffic / 100);
     setCyclistCount(town, scenario.cyclists); setPedestrianCount(town, scenario.pedestrians);
+    setVillagePeriod(town, scenario.period);
     updateRealMetrics(town); lastMetrics = -1;
     requestDraw(); notify(`${scenario.label} in Kings Langley.`);
 }
@@ -406,7 +513,8 @@ async function shareView() {
     const url = new URL(location.href);
     url.hash = writeViewState({ seed: currentSeed, view: camera.view, paused,
         traffic: Number(traffic.value), cyclists: Number(cyclists.value), pedestrians: Number(people.value),
-        width: Number(width.value), speed: Number(speed.value) });
+        width: Number(width.value), speed: Number(speed.value),
+        period: villageClock(town).period, villageMinutes: villageClock(town).minutes });
     try {
         await navigator.clipboard.writeText(url.href);
         notify('View link copied. Open it to start a fresh journey here.');
@@ -451,6 +559,12 @@ for (const [id, multiplier] of [['zoom-in', 1.25], ['zoom-out', 0.8]]) $(id).add
 traffic.addEventListener('input', () => { setRealTraffic(town, Number(traffic.value) / 100); lastMetrics = -1; requestDraw(); });
 cyclists.addEventListener('input', () => { setCyclistCount(town, Number(cyclists.value)); updateRealMetrics(town); lastMetrics = -1; requestDraw(); });
 people.addEventListener('input', () => { setPedestrianCount(town, Number(people.value)); updateRealMetrics(town); lastMetrics = -1; requestDraw(); });
+timeOfDay.addEventListener('change', () => {
+    setVillagePeriod(town, timeOfDay.value);
+    lastMetrics = -1;
+    requestDraw();
+    notify(`${DAY_PERIODS[timeOfDay.value].label} in Kings Langley.`);
+});
 width.addEventListener('input', () => {
     const requested = Number(width.value) / 100;
     const blocked = town.simulation.cars.some(car => car.turnaround &&
@@ -505,14 +619,17 @@ async function load() {
         camera = new MapCamera(map.bounds);
         resizeMap();
         $('place-focus').replaceChildren(new Option('Exploring the village', ''), ...map.landmarks.map(place => new Option(place.name, place.id)), new Option('Whole map', 'whole'));
+        timeOfDay.replaceChildren(...Object.values(DAY_PERIODS).map(period => new Option(period.label, period.id)));
+        timeOfDay.value = 'everyday';
         const shared = readViewState(location.hash);
         if (shared) {
             for (const [key, input] of Object.entries({ traffic, cyclists, pedestrians: people, width, speed })) {
                 if (shared[key] !== undefined) input.value = shared[key];
             }
             paused = motionPreference.matches || shared.paused;
+            if (shared.period) timeOfDay.value = shared.period;
         }
-        startTraffic(shared?.seed); focusPlace('village');
+        startTraffic(shared?.seed, shared?.villageMinutes); focusPlace('village');
         if (shared?.view) {
             const b = map.bounds;
             camera.view.x = Math.max(b.left, Math.min(b.right, shared.view.x));

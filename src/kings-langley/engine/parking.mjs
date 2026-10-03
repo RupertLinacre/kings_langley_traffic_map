@@ -1,5 +1,6 @@
 import { SCHOOLS } from './schools.mjs';
 import { position } from './graph.mjs';
+import { ParkingActivity } from '../../parking-activity.mjs';
 
 // The two residential stretches below follow the user's local observations.
 // Bay spacing and clearance are miniature assumptions, not surveyed markings.
@@ -42,6 +43,8 @@ export function parkingZones(data) {
       display: longest,
       displays: edges,
       parkingSide: options.parkingSide ?? 1,
+      parkingSides: options.parkingSides,
+      passingOffsets: options.passingOffsets,
       parkingOffset: options.parkingOffset ?? 3.8,
       // Both directions use the centre of the lane opposite the parked row.
       passingOffset: options.passingOffset ?? -(options.parkingSide ?? 1) * (longest.edge.forward ? 1 : -1) * 1.55,
@@ -53,6 +56,17 @@ export function parkingZones(data) {
     const edges = data.edges.filter(
       (e) => e.to === school.node && e.tags.name === school.road,
     );
+    const centre = school.outline.reduce((p, point) => [p[0] + point[0] / school.outline.length,
+      p[1] + point[1] / school.outline.length], [0, 0]);
+    const parkingSides = new Map(), passingOffsets = new Map();
+    for (const edge of edges) {
+      const p = position(edge, Math.max(0, edge.length - 22));
+      const side = Math.sign((centre[0] - p.x) * p.dy - (centre[1] - p.y) * p.dx) || 1;
+      parkingSides.set(edge.id, side); passingOffsets.set(edge.id, -side * 1.55);
+      const reverse = data.edges.find(other => other.way === edge.way && other.from === edge.to && other.to === edge.from);
+      if (reverse) { parkingSides.set(reverse.id, -side); passingOffsets.set(reverse.id, side * 1.55); }
+    }
+    const longest = [...edges].sort((a, b) => b.length - a.length)[0];
     add(
       school.id,
       school.road,
@@ -61,6 +75,8 @@ export function parkingZones(data) {
         start: Math.max(0, edge.length - 45),
         end: edge.length,
       })),
+      0,
+      { parkingSide: parkingSides.get(longest?.id) || 1, parkingSides, passingOffsets },
     );
   }
   const high = data.edges
@@ -126,18 +142,38 @@ export class Parking {
     for (const zone of this.zones)
       for (const [id, segment] of zone.segments)
         this.byEdge.set(id, { zone, ...segment });
+    this.activity = new ParkingActivity(this);
   }
+  enableActivities(enabled = true) { return this.activity.enable(enabled); }
+  setActivityDemand(level) { this.activity.demand = Math.max(0, Number(level) || 0); }
+  resetActivities(options) { return this.activity.reset(options); }
+  releaseMissing() { return this.activity.releaseMissing(); }
+  visibleSlots(zone) { return this.activity.visibleSlots(zone); }
+  request(c, options) { return this.activity.request(c, options); }
+  cancel(c) { return this.activity.cancel(c); }
+  pose(c, widthFactor = 1, alpha = 1) { return this.activity.pose(c, widthFactor, alpha); }
+  indicator(c) { return this.activity.indicator(c); }
+  managesMotion(c) { return Boolean(c.parkingActivity); }
+  gap(c) { return this.activity.gap(c); }
+  controller(p) { return p.section || p.zone; }
+  controllers() { return this.activity.enabled ? this.zones.flatMap(z => z.sections || []) : this.zones; }
   passages(c) {
     const result = [];
     for (let i = 0; i < c.route.length; i++) {
-      const segment = this.byEdge.get(c.route[i]);
-      if (!segment) continue;
+      const original = this.byEdge.get(c.route[i]);
+      if (!original) continue;
+      const candidates = this.activity.enabled
+        ? (original.zone.sections || []).map(section => ({ ...section.segments.get(c.route[i]), zone: original.zone, section }))
+          .filter(segment => Number.isFinite(segment.start))
+        : [original];
+      for (const segment of candidates) {
       const entry = c.offsets[i] + segment.start,
         exit = c.offsets[i] + segment.end;
       const prev = result.at(-1);
       if (
         prev &&
         prev.zone === segment.zone &&
+        prev.section === segment.section &&
         prev.direction === segment.direction &&
         entry - prev.exit < 1
       )
@@ -145,16 +181,18 @@ export class Parking {
       else
         result.push({
           zone: segment.zone,
+          section: segment.section,
           direction: segment.direction,
           entry,
           exit,
         });
+      }
     }
     for (const passage of result) {
       // Reserve the taper too: a long vehicle's rear must be back in its own
       // lane before the waiting oncoming car can start around the parked row.
-      passage.entry -= passage.zone.clearance;
-      passage.exit += passage.zone.clearance;
+      passage.entry -= this.controller(passage).clearance;
+      passage.exit += this.controller(passage).clearance;
     }
     return result;
   }
@@ -164,7 +202,9 @@ export class Parking {
     for (const zone of this.zones) {
       zone.claims.delete(c.id);
       zone.waiting.delete(c.id);
+      for (const section of zone.sections || []) { section.claims.delete(c.id); section.waiting.delete(c.id); }
     }
+    this.activity.releaseTarget(c);
     c.parkingPassages = this.passages(c);
   }
   parkedPosition(zone, slot, widthFactor = 1) {
@@ -179,14 +219,16 @@ export class Parking {
     }
     const { edge, start } = part, d = start + along;
     const p = position(edge, d);
-    const lateral = zone.parkingSide * zone.parkingOffset * widthFactor;
+    const lateral = (zone.parkingSides?.get(edge.id) ?? zone.parkingSide) * zone.parkingOffset * widthFactor;
     return { ...p, x: p.x + p.dy * lateral, y: p.y - p.dx * lateral, edge, d, lateral, length: 9 };
   }
   spawnAllowed(c) {
+    if (!this.activity.spawnAllowed(c)) return false;
     return (c.parkingPassages || []).every(p => {
-      if (!p.zone.narrow || c.q <= p.entry || c.q - c.length >= p.exit + 2) return true;
-      return !p.zone.clearing && (!p.zone.direction || p.zone.direction === p.direction) &&
-        [...p.zone.claims.values()].every(r => r.direction === p.direction);
+      const group = this.controller(p);
+      if (!group.narrow || c.q <= p.entry || c.q - c.length >= p.exit + 2) return true;
+      return !group.clearing && (!group.direction || group.direction === p.direction) &&
+        [...group.claims.values()].every(r => r.direction === p.direction);
     });
   }
   beginGroup(zone, direction) {
@@ -198,19 +240,22 @@ export class Parking {
   }
   claimSpawn(c) {
     for (const p of c.parkingPassages || []) {
-      if (!p.zone.narrow || c.q <= p.entry || c.q - c.length >= p.exit + 2) continue;
-      if (p.zone.direction !== p.direction) this.beginGroup(p.zone, p.direction);
-      p.zone.claims.set(c.id, { ...p, car: c });
-      p.zone.batch++;
+      const group = this.controller(p);
+      if (!group.narrow || c.q <= p.entry || c.q - c.length >= p.exit + 2) continue;
+      if (group.direction !== p.direction) this.beginGroup(group, p.direction);
+      group.claims.set(c.id, { ...p, car: c, grantedAt: this.sim.time });
+      group.batch++;
     }
+    this.activity.syncClaims();
   }
   count(zone) {
     return zone.baseline + zone.parked.size;
   }
   update(dt, occupied) {
     const s = this.sim;
+    this.activity.update(dt, occupied);
     for (const c of s.cars)
-      if (c.parked) {
+      if (c.parked && !c.parkingManaged) {
         c.roadStop.remaining = Math.max(0, c.roadStop.remaining - dt);
         if (c.roadStop.remaining > 0) continue;
         const zone = c.parked.zone;
@@ -235,16 +280,17 @@ export class Parking {
         c.roadStop.done = true;
         if (passage) {
           if (!zone.direction) this.beginGroup(zone, passage.direction);
-          zone.claims.set(c.id, { ...passage, car: c });
+          zone.claims.set(c.id, { ...passage, car: c, grantedAt: s.time });
           zone.batch++;
         }
         zone.parked.delete(c.id);
         occupied = s.occupancy();
       }
-    for (const zone of this.zones) {
+    for (const zone of this.controllers()) {
+      const ownerZone = zone.rootZone || zone;
       for (const [id, c] of zone.parked)
-        if (!s.cars.includes(c) || c.parked?.zone !== zone) zone.parked.delete(id);
-      const active = this.count(zone) > 0;
+        if (!s.cars.includes(c) || c.parked?.zone !== ownerZone) zone.parked.delete(id);
+      const active = zone.rootZone ? zone.active : this.count(zone) > 0;
       if (active && !zone.narrow) zone.clearing = true;
       zone.narrow = active;
       for (const [id, claim] of zone.claims)
@@ -256,17 +302,17 @@ export class Parking {
           zone.claims.delete(id);
       const requests = [];
       for (const c of s.cars) {
-        if (c.parked) continue;
+        if (c.parked || c.parkingActivity) continue;
         for (const p of c.parkingPassages || []) {
           if (
-            p.zone !== zone ||
+            this.controller(p) !== zone ||
             c.q - c.length > p.exit + 2 ||
             p.entry - c.q > Math.max(45, c.v * 3)
           )
             continue;
           if (c.q > p.entry && !zone.claims.has(c.id)) {
             if (!zone.direction) this.beginGroup(zone, p.direction);
-            zone.claims.set(c.id, { ...p, car: c });
+            zone.claims.set(c.id, { ...p, car: c, grantedAt: s.time });
             zone.batch++;
           }
           if (c.q <= p.entry && !zone.claims.has(c.id)) {
@@ -274,7 +320,8 @@ export class Parking {
             // A follower may join its leader's group before reaching the stop
             // line. Ordinary following distances still control its movement.
             if (leader.frontGap < p.entry - c.q && !zone.claims.has(leader.car?.id)) continue;
-            if (!zone.waiting.has(c.id)) zone.waiting.set(c.id, s.time);
+            if (!zone.waiting.has(c.id)) zone.waiting.set(c.id, zone.rootZone?.waitHistory?.get(c.id) ?? s.time);
+            if (zone.rootZone) zone.rootZone.waitHistory.set(c.id, zone.waiting.get(c.id));
             requests.push({ ...p, car: c, since: zone.waiting.get(c.id) });
           }
         }
@@ -282,6 +329,18 @@ export class Parking {
       const requestIds = new Set(requests.map((r) => r.car.id));
       for (const id of zone.waiting.keys())
         if (!requestIds.has(id)) zone.waiting.delete(id);
+      const overdueOpposed = zone.rootZone && requests.some(r => r.direction !== zone.direction && s.time - r.since >= 50);
+      if (overdueOpposed) for (const [id, claim] of zone.claims) {
+        // An unused promise before a junction must not hold the opposite side
+        // while its owner is itself waiting for that side to clear the turn.
+        // Entered bodies and moving commitments retain their complete taper.
+        if (claim.car.q > claim.entry || claim.car.v >= 0.2 || claim.car.stopped < 8 ||
+            s.time - (claim.grantedAt ?? -Infinity) < 8) continue;
+        zone.claims.delete(id);
+        const since = zone.rootZone.waitHistory.get(id) ?? s.time;
+        zone.waiting.set(id, since);
+        requests.push({ ...claim, since });
+      }
       if (!active) {
         zone.direction = 0;
         zone.batch = 0;
@@ -294,10 +353,11 @@ export class Parking {
         zone.direction = 0;
       }
       const opposed = requests.filter((r) => r.direction !== zone.direction);
+      const yieldingDirection = zone.direction;
       const yieldNow =
         zone.direction &&
         opposed.length &&
-        zone.batch >= zone.batchLimit;
+        (zone.batch >= zone.batchLimit || zone.rootZone && opposed.some(r => s.time - r.since >= 50));
       const nextDirection = yieldNow ? -zone.direction : 0;
       if (
         !zone.claims.size &&
@@ -317,9 +377,12 @@ export class Parking {
         const next = requests.find(r => r.direction === nextDirection) || requests[0];
         this.beginGroup(zone, next.direction);
       }
+      const preferred = this.activity.preferredDirection(zone);
+      if (preferred && !zone.claims.size && zone.direction !== preferred) this.beginGroup(zone, preferred);
       for (const r of requests.sort(
         (a, b) => a.entry - a.car.q - (b.entry - b.car.q),
       )) {
+        if (zone.rootZone?.reconfiguring) continue;
         if (r.direction !== zone.direction)
           continue;
         if ([...zone.claims.values()].some((x) => x.direction !== r.direction))
@@ -338,20 +401,24 @@ export class Parking {
           r.exit,
         );
         if (downstream.gap < r.car.length + 4) continue;
-        if (requests.some(x => x.direction !== zone.direction) && zone.batch >= zone.batchLimit) continue;
-        zone.claims.set(r.car.id, r);
+        if (requests.some(x => x.direction !== zone.direction) &&
+            (zone.batch >= zone.batchLimit || yieldNow && zone.direction === yieldingDirection)) continue;
+        zone.claims.set(r.car.id, { ...r, grantedAt: s.time });
         zone.batch++;
       }
     }
+    this.activity.syncClaims();
+    this.activity.refreshSections();
   }
   constraint(c) {
     let gap = Infinity,
       speed = Infinity;
     for (const p of c.parkingPassages || []) {
-      if (!p.zone.narrow || c.q - c.length > p.exit + 2) continue;
+      const group = this.controller(p);
+      if (!group.narrow || c.q - c.length > p.exit + 2) continue;
       if (c.q >= p.entry - 10 && c.q <= p.exit)
         speed = Math.min(speed, c.length > 12 ? 3 : 5);
-      if (!p.zone.claims.has(c.id) && c.q <= p.entry) {
+      if (!group.claims.has(c.id) && c.q <= p.entry) {
         let holdingPoint = p.entry;
         if (p.zone.localObservation) {
           const junction = c.offsets.findLast(offset => offset <= p.entry);
@@ -364,9 +431,15 @@ export class Parking {
         gap = Math.min(gap, Math.max(0, holdingPoint - c.q));
       }
     }
+    const search = c.parkingSearch;
+    if (search && ['searching', 'full', 'approaching'].includes(search.state)) {
+      const distance = (search.target?.q ?? search.firstQ) - c.q;
+      if (distance < 75 && distance > -40) speed = Math.min(speed, 4);
+    }
     return { gap, speed };
   }
   tryPark(c) {
+    if (this.activity.enabled) return this.activity.tryPark(c);
     const stop = c.roadStop;
     const zone = this.zones.find((z) => z.id === stop.parkingZone);
     if (!zone || this.count(zone) >= zone.capacity) return false;
@@ -386,11 +459,19 @@ export class Parking {
   lateral(c, edge, d, normal) {
     const seg = this.byEdge.get(edge.id);
     if (!seg || !seg.zone.narrow || seg.zone.clearing) return normal;
+    if (this.activity.enabled) {
+      const part = (seg.zone.sections || []).map(section => ({ ...section.segments.get(edge.id), section }))
+        .find(part => Number.isFinite(part.start) && d >= part.start - 10 && d <= part.end + 10);
+      if (!part) return normal;
+      const blend = Math.max(0, Math.min(1, (d - part.start + 10) / 10, (part.end + 10 - d) / 10));
+      const sharedLane = seg.zone.passingOffsets?.get(edge.id) ?? seg.zone.passingOffset * seg.direction;
+      return normal * (1 - blend) + sharedLane * blend;
+    }
     const blend = Math.max(
       0,
       Math.min(1, (d - seg.start + 10) / 10, (seg.end + 10 - d) / 10),
     );
-    const sharedLane = seg.zone.passingOffset * seg.direction;
+    const sharedLane = seg.zone.passingOffsets?.get(edge.id) ?? seg.zone.passingOffset * seg.direction;
     return normal * (1 - blend) + sharedLane * blend;
   }
 }

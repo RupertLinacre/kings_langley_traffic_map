@@ -4,12 +4,18 @@ import { measure, pathPoint } from './street-geometry.mjs';
 import { attachCyclists, setCyclistCount, maintainCyclists } from './real-cyclists.mjs';
 import { createPedestrians, setPedestrianCount, updatePedestrians, pedestrianTrafficLimit, pedestrianSpawnAllowed } from './real-pedestrians.mjs';
 import { createRailway } from './railway.mjs';
+import { createCanalBoats } from './canal-boats.mjs';
 import { turnaroundPose, turnaroundFits, preferredRoadCost } from './kings-langley/engine/adaptive-traffic.mjs';
 import { updateVillageVisits } from './village-visits.mjs';
+import { attachBusServices, setBusTraffic, updateBusServices } from './real-buses.mjs';
+import { attachStationVisits, resetStationTraffic, updateStationVisits, stationVehiclePose } from './station-visits.mjs';
+import { attachVillageDay, updateVillageDay } from './village-day.mjs';
+import { attachPurposefulJourneys, updatePurposefulJourneys, resetPurposefulJourneys } from './purposeful-journeys.mjs';
 export { position, laneCount, laneOffset, isSignal, isCirculatory, pathPoint };
 export { setCyclistCount, setPedestrianCount };
 export const BUS_STYLES = [
-    { number: '12', colour: '#cf5249' }, { number: '24', colour: '#258b8a' }, { number: '36', colour: '#cc933c' },
+    { number: '322', colour: '#258b8a' }, { number: '501', colour: '#cf5249' },
+    { number: 'H19', colour: '#cf5249' }, { number: 'R9', colour: '#cf5249' }, { number: 'KL80', colour: '#cf5249' },
 ];
 const CAR_COLOURS = ['#efe9d9', '#537d9b', '#d68563', '#e4b94f', '#718978', '#a7b9bc', '#49556a'];
 export function randomSource(seed) {
@@ -67,6 +73,10 @@ export function prepareMap(data) {
         }
         road.widthCap = Math.max(1, cap);
     }
+    // The station forecourt sits beside the railway. Keep this short approach
+    // narrow enough for its off-road pickup bays and the platform access.
+    const stationForecourt = roads.find(road => road.id === 233961901);
+    if (stationForecourt) stationForecourt.widthCap = 1.25;
     const roadById = new Map(roads.map(road => [road.id, road]));
     const mapBounds = bounds(roads.flatMap(r => r.points));
     const station = data.places.find(p => p.station && p.name === 'Kings Langley');
@@ -92,11 +102,17 @@ export function prepareMap(data) {
 // Longer miniature bodies preserve the proportions of the original artwork.
 // Their enlarged lengths are used by the physics as well as by the renderer.
 export class MiniatureSimulation extends Simulation {
-    createVehicle(path, type = 'car', ...args) {
+    createVehicle(path, type = 'car', distance = 0, lane = 0, profile = null) {
         // The restored Toms Lane underpass has a 10 ft 9 in clearance.
         // Demand's global bus share must not turn its car journeys into buses.
-        if (['bus', 'lorry'].includes(type) && path.some(id => this.data.edges[id].restoredUnderpass)) type = 'car';
-        const car = super.createVehicle(path, type, ...args);
+        const lowBus = type === 'bus' && profile?.height > 0 && profile.height <= 3.2766;
+        if (['bus', 'lorry'].includes(type) && !lowBus && path.some(id => this.data.edges[id].restoredUnderpass)) type = 'car';
+        const car = super.createVehicle(path, type, distance, lane);
+        if (profile && car.type === 'bus') {
+            car.height = profile.height;
+            car.length = profile.length || car.length;
+            car.width = profile.width || car.width;
+        }
         car.length *= car.type === 'bicycle' ? 1 : car.type === 'car' ? 2.1 : car.type === 'bus' ? 1.45 : car.type === 'van' ? 1.6 : 1.2;
         car.minGap *= 1.35;
         car.paint = CAR_COLOURS[car.id % CAR_COLOURS.length];
@@ -104,28 +120,43 @@ export class MiniatureSimulation extends Simulation {
         return car;
     }
 }
-export function createRealTown(map, demand, seed, { cyclists = 24, pedestrians = 140 } = {}) {
+export function createRealTown(map, demand, seed, { cyclists = 24, pedestrians = 140, period = 'everyday', initialMinutes } = {}) {
     const simulation = new MiniatureSimulation(map.data, seed, demand);
     simulation.maxVehicles = 2000;
-    simulation.busShare = 0.07;
+    simulation.busShare = 0;
     simulation.setPopularity(3);
     const town = { map, simulation, seed, trafficLevel: 1, baseTraffic: 250, metrics: null, metricClock: -1 };
+    attachVillageDay(town, { period, initialMinutes });
     town.trains = createRailway(map);
-    setRealTraffic(town, 1);
+    town.boats = createCanalBoats(map, seed);
+    attachBusServices(town);
     attachCyclists(town, cyclists);
     createPedestrians(town, seed);
     setPedestrianCount(town, pedestrians);
+    attachStationVisits(town);
     simulation.crossingStop = (car, edge) => pedestrianTrafficLimit(town, car, edge);
-    simulation.crossingSpawnAllowed = car => pedestrianSpawnAllowed(town, car) && simulation.adaptive.spawnAllowed(car);
+    simulation.crossingSpawnAllowed = car => pedestrianSpawnAllowed(town, car) && simulation.adaptive.spawnAllowed(car) &&
+        simulation.busOvertaking.spawnAllowed(car) && simulation.parking.spawnAllowed(car);
     simulation.turnaroundAllowed = (car, edge, d, radius) =>
         turnaroundFits(car, roadWidthFactor(map.roadById.get(edge.way), town.walking.widthFactor)) &&
         !town.walking.crossings.some(crossing => crossing.edgeDistances.has(edge.id) && Math.abs(crossing.edgeDistances.get(edge.id) - d) < radius + 8);
+    simulation.busPassAllowed = (car, edge, from, to) =>
+        !town.walking.crossings.some(crossing => crossing.edgeDistances.has(edge.id) &&
+            crossing.edgeDistances.get(edge.id) > from - 12 && crossing.edgeDistances.get(edge.id) < to + 12);
+    simulation.parkingManoeuvreAllowed = (car, edge, d, radius) =>
+        !town.walking.crossings.some(crossing => crossing.edgeDistances.has(edge.id) &&
+            Math.abs(crossing.edgeDistances.get(edge.id) - d) < radius + 3.5);
+    simulation.parking.enableActivities?.(true);
+    attachPurposefulJourneys(town);
+    setRealTraffic(town, 1);
     updateRealMetrics(town);
     return town;
 }
 export function setRealTraffic(town, level) {
     if (!Number.isFinite(level)) return;
     town.trafficLevel = Math.max(0, Math.min(6, level));
+    resetStationTraffic(town);
+    if (town.trafficLevel === 0) resetPurposefulJourneys(town);
     if (town.trafficLevel === 0 && town.villageVisits) town.villageVisits.pending = [];
     const s = town.simulation, bicycles = s.cars.filter(c => c.type === 'bicycle');
     const motors = s.cars.filter(c => c.type !== 'bicycle');
@@ -146,17 +177,22 @@ export function setRealTraffic(town, level) {
     // Lowering demand should also clear the old backlog instead of inserting
     // thousands of previously requested cars after the user empties the map.
     s.pending.clear(); s.pendingFleet.clear(); s.pendingTotal = 0;
-    for (const zone of s.parking.zones) {
-        zone.baseline = zone.defaultBaseline;
-        zone.narrow = zone.baseline + zone.parked.size > 0;
-    }
-    if (target > motors.length) s.seedCars(target + bicycles.length);
+    s.parking.setActivityDemand?.(town.trafficLevel);
+    s.parking.releaseMissing?.();
+    s.busOvertaking.releaseMissing();
+    setBusTraffic(town, target > 0 ? town.trafficLevel : 0);
+    if (target > s.cars.filter(car => car.type !== 'bicycle').length) s.seedCars(target + bicycles.length);
     updateRealMetrics(town);
 }
 export function updateRealTown(town, dt) {
+    if (!(dt > 0)) return;
+    const clock = updateVillageDay(town);
     updatePedestrians(town, dt);
     updateVillageVisits(town, dt);
-    town.simulation.step(dt, Math.min(4, town.trafficLevel * 0.65));
+    updateBusServices(town);
+    updateStationVisits(town, dt);
+    updatePurposefulJourneys(town, dt);
+    town.simulation.step(dt, Math.min(4, town.trafficLevel * 0.65 * clock.demandFactor));
     maintainCyclists(town, dt);
     if (town.simulation.time - town.metricClock >= 0.5) updateRealMetrics(town);
 }
@@ -189,6 +225,19 @@ export function planRealTrip(town, from, to) {
     return { ids, edges, metres: edges.reduce((sum, e) => sum + e.length, 0), seconds: edges.reduce((sum, e) => sum + e.length / e.speed + delay(e), 0) };
 }
 export function realVehiclePose(town, car, widthFactor, alpha = 1) {
+    const station = stationVehiclePose(town, car, widthFactor, alpha);
+    if (station) return station;
+    const parkingEdge = car.parkingActivity?.target.edge || (car.parked?.zone &&
+        town.simulation.parking.parkedPosition(car.parked.zone, car.parked.slot).edge);
+    const parking = parkingEdge && town.simulation.parking.pose?.(car,
+        roadWidthFactor(town.map.roadById.get(parkingEdge.way), widthFactor), alpha);
+    if (parking) return { ...parking, road: town.map.roadById.get(parking.edge.way) };
+    if (car.parked) {
+        const raw = town.simulation.parking.parkedPosition(car.parked.zone, car.parked.slot);
+        const road = town.map.roadById.get(raw.edge.way);
+        const p = town.simulation.parking.parkedPosition(car.parked.zone, car.parked.slot, roadWidthFactor(road, widthFactor));
+        return { ...p, road, angle: Math.atan2(p.dy, p.dx) + (car.parked.direction === -1 ? Math.PI : 0) };
+    }
     if (car.turnaround) {
         const road = town.map.roadById.get(town.map.data.edges[car.route[car.index]].way);
         const turning = turnaroundPose(town.simulation, car, roadWidthFactor(road, widthFactor), alpha);
@@ -202,11 +251,13 @@ export function realVehiclePose(town, car, widthFactor, alpha = 1) {
         const edge = town.map.data.edges[car.route[index]], d = Math.max(0, distance - car.offsets[index]);
         const p = position(edge, d);
         const road = town.map.roadById.get(edge.way);
-        const lateral = s.parking.lateral(car, edge, d, laneOffset(edge, car.lanes[index])) * roadWidthFactor(road, widthFactor);
+        const normal = s.parking.lateral(car, edge, d, laneOffset(edge, car.lanes[index]));
+        const lateral = (s.busOvertaking?.lateral(car, edge, d, normal, alpha) ?? normal) * roadWidthFactor(road, widthFactor);
         return { x: p.x + p.dy * lateral, y: p.y - p.dx * lateral, edge, road, angle: Math.atan2(p.dy, p.dx) };
     }
     const p = at(q), a = at(Math.max(0, q - car.length * 0.35)), b = at(Math.min(car.offsets.at(-1), q + car.length * 0.35));
     // Looking along the body softens heading changes at surveyed shape nodes.
     p.angle = Math.atan2(b.y - a.y, b.x - a.x);
+    p.angle += s.busOvertaking?.steering(car, roadWidthFactor(p.road, widthFactor), alpha) || 0;
     return p;
 }

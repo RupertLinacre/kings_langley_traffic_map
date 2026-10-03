@@ -113,7 +113,7 @@ export function drawVehicle(g, vehicle, p, time) {
         g.font = 'bold 7px system-ui, sans-serif';
         g.textAlign = 'center';
         g.textBaseline = 'middle';
-        g.fillText(vehicle.route.number, 5, 0.4);
+        g.fillText(vehicle.route.number, length > 26 ? 5 : 0, 0.4, Math.max(8, Math.min(18, length - 12)));
     } else if (vehicle.type === 'lorry') {
         rounded(g, -length / 2 + 1, -width / 2 + 0.7, length * 0.68, width - 1.4, 1, '#e7e4d8');
         for (let x = -length / 2 + 4; x < length * 0.18; x += 4) line(g, x, -width / 2 + 1.5, x, width / 2 - 1.5, '#b9c5bd', 0.7);

@@ -1,10 +1,12 @@
 export const SCENARIOS = {
-    quiet: { label: 'Quiet morning', traffic: 40, cyclists: 12, pedestrians: 80 },
-    everyday: { label: 'Village life', traffic: 100, cyclists: 24, pedestrians: 140 },
-    rush: { label: 'Rush hour', traffic: 300, cyclists: 45, pedestrians: 220 },
+    quiet: { label: 'Quiet morning', period: 'quiet', traffic: 40, cyclists: 12, pedestrians: 80 },
+    everyday: { label: 'Village life', period: 'everyday', traffic: 100, cyclists: 24, pedestrians: 140 },
+    'school-run': { label: 'School run', period: 'school-run', traffic: 160, cyclists: 18, pedestrians: 160 },
+    rush: { label: 'Rush hour', period: 'rush', traffic: 300, cyclists: 45, pedestrians: 220 },
 };
 
 const LIMITS = { traffic: [0, 600], cyclists: [0, 150], pedestrians: [0, 400], width: [150, 400], speed: [0.5, 8] };
+const PERIODS = new Set(['quiet', 'school-run', 'everyday', 'afternoon', 'rush', 'evening']);
 
 // Shared links describe a view and its miniature scene, not a live traffic feed.
 export function readViewState(hash) {
@@ -24,6 +26,9 @@ export function readViewState(hash) {
         state.view = { x, y, scale };
     }
     state.paused = params.get('paused') === '1';
+    if (PERIODS.has(params.get('period'))) state.period = params.get('period');
+    const villageMinutes = number('villageMinutes');
+    if (state.period && villageMinutes >= 0 && villageMinutes < 1440) state.villageMinutes = villageMinutes;
     return state;
 }
 
@@ -33,13 +38,19 @@ export function writeViewState({ seed, view, paused, ...settings }) {
     params.set('y', view.y.toFixed(2));
     params.set('scale', view.scale.toFixed(5));
     for (const key of Object.keys(LIMITS)) if (Number.isFinite(settings[key])) params.set(key, String(settings[key]));
+    if (PERIODS.has(settings.period)) {
+        params.set('period', settings.period);
+        if (Number.isFinite(settings.villageMinutes) && settings.villageMinutes >= 0 && settings.villageMinutes < 1440)
+            params.set('villageMinutes', String(settings.villageMinutes));
+    }
     if (paused) params.set('paused', '1');
     return `#${params}`;
 }
 
-export function scenarioFor(traffic, cyclists, pedestrians) {
+export function scenarioFor(traffic, cyclists, pedestrians, period = null) {
     return Object.keys(SCENARIOS).find(key => {
         const scenario = SCENARIOS[key];
-        return scenario.traffic === traffic && scenario.cyclists === cyclists && scenario.pedestrians === pedestrians;
+        return scenario.traffic === traffic && scenario.cyclists === cyclists && scenario.pedestrians === pedestrians &&
+            (!period || scenario.period === period);
     }) || null;
 }
