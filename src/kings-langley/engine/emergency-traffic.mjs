@@ -1,4 +1,4 @@
-import { position } from './graph.mjs';
+import { position, canTurn } from './graph.mjs';
 import { laneCount, laneOffset } from './traffic-model.mjs';
 import { orientedBodiesOverlap } from '../../body-geometry.mjs';
 
@@ -8,6 +8,22 @@ const sameLayer = (a, b) => layerOf(a) === layerOf(b);
 const radius = body => Math.hypot(body.length, body.width) / 2;
 const nearby = (a, b, extra = 0) => Math.hypot(a.x - b.x, a.y - b.y) <= radius(a) + radius(b) + extra;
 const clamp = (n, low, high) => Math.max(low, Math.min(high, n));
+export const SIREN_HEARING_DISTANCE = 600;
+
+function projectOntoEdge(point, edge) {
+  let offset = 0, best = null;
+  for (let i = 1; i < edge.points.length; i++) {
+    const a = edge.points[i - 1], b = edge.points[i], dx = b[0] - a[0], dy = b[1] - a[1];
+    const length = Math.hypot(dx, dy);
+    if (!length) continue;
+    const t = clamp(((point.x - a[0]) * dx + (point.y - a[1]) * dy) / (length * length), 0, 1);
+    const distance = Math.hypot(point.x - a[0] - t * dx, point.y - a[1] - t * dy);
+    if (!best || distance < best.distance)
+      best = { distance, d: offset + t * length, dx: dx / length, dy: dy / length };
+    offset += length;
+  }
+  return best;
+}
 
 /** The player is a separate, freely steered actor. This controller makes
  * ordinary road traffic yield without changing routes, signals or the map.
@@ -24,11 +40,19 @@ export class EmergencyTraffic {
     this.states = new Map();
     this.owners = new Map();
     this.gaps = new Map();
+    this.sirenPath = undefined;
+    this.reverseEdges = new Map();
+    for (const edge of simulation.data.edges) {
+      const key = `${edge.way}:${edge.from}:${edge.to}`;
+      if (!this.reverseEdges.has(key)) this.reverseEdges.set(key, []);
+      this.reverseEdges.get(key).push(edge);
+    }
   }
   setPlayer(player) {
     this.player = player?.active ? { ...player, length: player.length || 9, width: player.width || 2.5,
       layer: layerOf(player) } : null;
     this.gaps.clear();
+    this.sirenPath = undefined;
   }
   setPoseProvider(provider) { this.poseProvider = provider; this.gaps.clear(); }
   setObstacleProvider(provider) { this.obstacleProvider = provider; }
@@ -94,14 +118,82 @@ export class EmergencyTraffic {
     const p = this.player;
     if (!p?.siren || !sameLayer(body, p) || body.station || car.parked || car.parkingActivity || car.turnaround || car.busPass) return false;
     const dx = body.x - p.x, dy = body.y - p.y, distance = Math.hypot(dx, dy);
-    if (distance > 150) return false;
+    if (distance > SIREN_HEARING_DISTANCE) return false;
+    const corridor = this.sirenCorridor();
+    if (corridor) {
+      const span = corridor.edges.get(body.edge.id);
+      if (span) {
+        const at = projectOntoEdge(body, body.edge)?.d;
+        // A car behind the appliance has already been passed. Do not stop it
+        // again merely because its eventual route rejoins the road ahead.
+        return at !== undefined && at >= span.from - 1e-6 && at <= span.to + 1e-6;
+      }
+      // Only drivers actually approaching this corridor's junctions respond.
+      // Hearing the siren does not freeze every separate parallel street.
+      let ahead = 0;
+      for (let i = car.index; i < car.route.length && ahead <= SIREN_HEARING_DISTANCE; i++) {
+        const edge = this.sim.data.edges[car.route[i]];
+        if (edgeLayer(edge) !== layerOf(p)) break;
+        ahead += edge.length - (i === car.index ? car.d : 0);
+        if (ahead > SIREN_HEARING_DISTANCE) break;
+        if (corridor.nodes.has(edge.to)) return true;
+      }
+      return false;
+    }
     const forward = dx * Math.cos(p.angle) + dy * Math.sin(p.angle);
     const side = Math.abs(-dx * Math.sin(p.angle) + dy * Math.cos(p.angle));
     if (forward > -15 && side < Math.max(13, (body.roadHalfWidth || 0) + 3)) return true;
-    // Cross traffic approaching the engine's nearby junction also gives way.
+    // A freely steered engine can point across a road before its heading
+    // matches a mapped approach. Use the same audible range in that case.
     const ahead = -dx * Math.cos(body.angle) - dy * Math.sin(body.angle);
     const across = Math.abs(dx * Math.sin(body.angle) - dy * Math.cos(body.angle));
-    return distance < 70 && ahead > 0 && across < p.width / 2 + body.width / 2 + 5;
+    return ahead > 0 && across < p.width / 2 + body.width / 2 + 5;
+  }
+  sirenCorridor() {
+    if (this.sirenPath !== undefined) return this.sirenPath;
+    this.sirenPath = null;
+    const p = this.player;
+    if (!p?.siren) return null;
+    let start = null;
+    // The real player supplies its current road; graph-only callers can use
+    // the nearest heading-compatible edge. This projection happens once per
+    // player pose, rather than once for every car hearing the same siren.
+    for (const edge of p.road?.edges || this.sim.data.edges) {
+      if (edgeLayer(edge) !== layerOf(p)) continue;
+      const at = projectOntoEdge(p, edge);
+      if (!at || at.distance > Math.max(13, p.width + 3)) continue;
+      const alignment = at.dx * Math.cos(p.angle) + at.dy * Math.sin(p.angle);
+      if (alignment < 0.35) continue;
+      const score = at.distance + (1 - alignment) * 3;
+      if (!start || score < start.score) start = { edge, at, score };
+    }
+    if (!start) return null;
+    const corridor = { edges: new Map(), nodes: new Set() }, visited = new Set();
+    let edge = start.edge, from = Math.max(0, start.at.d - 15), remaining = SIREN_HEARING_DISTANCE + 15;
+    for (let steps = 0; edge && remaining > 0 && steps < 48; steps++) {
+      if (visited.has(edge.id)) break;
+      visited.add(edge.id);
+      const to = Math.min(edge.length, from + remaining);
+      corridor.edges.set(edge.id, { from, to });
+      for (const reverse of this.reverseEdges.get(`${edge.way}:${edge.to}:${edge.from}`) || [])
+        corridor.edges.set(reverse.id, { from: reverse.length - to, to: reverse.length - from });
+      if (from === 0) corridor.nodes.add(edge.from);
+      if (to < edge.length) break;
+      corridor.nodes.add(edge.to);
+      remaining -= to - from;
+      const direction = position(edge, edge.length), choices = [];
+      for (const next of this.sim.graph.out.get(edge.to) || []) {
+        if (edgeLayer(next) !== layerOf(p) || visited.has(next.id) || !canTurn(this.sim.graph, edge, next)) continue;
+        const heading = position(next, 0), alignment = direction.dx * heading.dx + direction.dy * heading.dy;
+        const continuous = edge.way === next.way || Boolean(edge.tags.name && edge.tags.name === next.tags.name);
+        if (alignment < 0.2 && !(continuous && alignment > -0.5)) continue;
+        choices.push({ edge: next, score: alignment + (continuous ? 0.4 : 0) });
+      }
+      choices.sort((a, b) => b.score - a.score || a.edge.id - b.edge.id);
+      edge = choices[0]?.edge; from = 0;
+    }
+    this.sirenPath = corridor;
+    return corridor;
   }
   ensureState(car) {
     let state = this.states.get(car.id);

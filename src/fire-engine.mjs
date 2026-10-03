@@ -15,6 +15,9 @@ const buildingGeometry = new WeakMap();
 const stations = new WeakMap();
 const CELL = 48;
 const PAVEMENT = 3;
+// The map and simulation use metres and seconds, including accelerated play.
+export const FIRE_ENGINE_MAX_SPEED_MPS = 80 * 0.44704;
+const DRIVE_STEP_SECONDS = 0.01;
 
 function segment(a, b, extra = {}) {
     const dx = b.x - a.x, dy = b.y - a.y;
@@ -327,9 +330,9 @@ export function updateFireEngine(town, dt, input = {}, widthFactor = town.fireEn
     engine.blocked = '';
     engine.edgeAssist = false;
     const obstacles = obstaclesForMove(town, widthFactor);
-    // Bounded small swept steps check rotation as well as translation. A large
-    // caller dt cannot tunnel through a pedestrian, wall, kerb or reserved turn.
-    const steps = Math.max(1, Math.ceil(Math.min(dt, 1) / 0.025)), h = Math.min(dt, 1) / steps;
+    // At 80 mph each swept step travels at most 36 cm. Check rotation too,
+    // preserving small-obstacle protection and the same motion at 1× and 8×.
+    const steps = Math.max(1, Math.ceil(Math.min(dt, 1) / DRIVE_STEP_SECONDS)), h = Math.min(dt, 1) / steps;
     for (let i = 0; i < steps; i++) {
         engine.time += h;
         // Generous steering lock helps parking-speed village corners; limiting
@@ -338,7 +341,7 @@ export function updateFireEngine(town, dt, input = {}, widthFactor = town.fireEn
         engine.steering += clamp(steeringTarget - engine.steering, -2.2 * h, 2.2 * h);
         let speed = engine.speed;
         if (engine.braking) speed = Math.sign(speed) * Math.max(0, Math.abs(speed) - 7 * h);
-        else if (throttle) speed = clamp(speed + throttle * (throttle > 0 ? 3.4 : 2.5) * h, -3.5, 12);
+        else if (throttle) speed = clamp(speed + throttle * (throttle > 0 ? 3.4 : 2.5) * h, -3.5, FIRE_ENGINE_MAX_SPEED_MPS);
         else speed = Math.sign(speed) * Math.max(0, Math.abs(speed) - (0.7 + Math.abs(speed) * 0.06) * h);
         if (Math.abs(speed) < 1e-9) speed = 0;
         const turn = speed / 5.7 * Math.tan(engine.steering) * h;
