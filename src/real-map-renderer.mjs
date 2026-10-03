@@ -8,6 +8,8 @@ import { drawCanalBoats, drawCanalLocks } from './canal-boat-art.mjs';
 import { drawBusStops } from './real-bus-art.mjs';
 import { drawStationArea, drawStationPassengers } from './station-art.mjs';
 import { drawJourneyGroups } from './journey-art.mjs';
+import { drawFireEngine } from './fire-engine-art.mjs';
+import { fireEnginePose } from './fire-engine.mjs';
 
 export class RealMapRenderer {
     constructor(canvas) {
@@ -353,7 +355,8 @@ export class RealMapRenderer {
                 if (car.parked && !car.stationVisit && !s.parking.managesMotion?.(car)) continue;
                 const bus = car.type === 'bus';
                 const current = this.map.data.edges[car.route[car.index]], next = this.map.data.edges[car.route[car.index + 1]];
-                let indicator = s.parking.indicator?.(car) || (car.turnaround ? 1 : car.busPass?.phase === 'out' ? 1 : car.busPass?.phase === 'return' ? -1 : 0);
+                let indicator = car.emergencyYield?.active ? -1 : Math.abs(car.emergencyYield?.offset || 0) > 0.05 ? 1 :
+                    s.parking.indicator?.(car) || (car.turnaround ? 1 : car.busPass?.phase === 'out' ? 1 : car.busPass?.phase === 'return' ? -1 : 0);
                 if (!indicator && next && current.length - car.d < 35) {
                     const a = position(current, current.length), b = position(next, 0);
                     const angle = Math.atan2(a.dx * b.dy - a.dy * b.dx, a.dx * b.dx + a.dy * b.dy);
@@ -373,6 +376,12 @@ export class RealMapRenderer {
             }
             drawStationPassengers(g, this.town, time, this.roadSize, layer, p => this.visible(p, 10), paused ? 1 : alpha);
             drawJourneyGroups(g, this.town, time, this.roadSize, layer, p => this.visible(p, 10), paused ? 1 : alpha);
+            if (this.town.fireEngine?.active) {
+                const engine = this.town.fireEngine, p = fireEnginePose(this.town, paused ? 1 : alpha);
+                if (p.layer === layer && this.visible(p)) drawFireEngine(g, p, { time, siren: engine.siren,
+                    length: engine.length, width: p.width || engine.width * this.factor(p.road),
+                    zoom: this.view.scale, braking: Math.abs(engine.speed) < 0.2 });
+            }
         }
         this.transform(g);
         for (const zone of s.parking.zones) {

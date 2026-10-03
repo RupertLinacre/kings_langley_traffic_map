@@ -2,6 +2,8 @@ import { findRoute, position } from './kings-langley/engine/graph.mjs';
 import { laneOffset } from './kings-langley/engine/traffic-model.mjs';
 import { trackPoint, trainTiming, trainStationSchedule } from './railway.mjs';
 import { measure, pathPoint } from './street-geometry.mjs';
+import { pedestrianMotionBlocked } from './real-pedestrians.mjs';
+import { orientedBodiesOverlap } from './body-geometry.mjs';
 
 const HOLD = 86400;
 const TURN_SECONDS = 3;
@@ -198,8 +200,24 @@ function advancePassengers(town, dt, schedule) {
     for (const person of state.passengers) {
         const trip = person.trip;
         person.previousElapsed = person.elapsed; person.previousProgress = person.progress; person.previousPhase = person.phase;
-        person.elapsed += dt;
         const walk = platformWalk(state, trip);
+        person.fireEngineWaiting = false;
+        if (town.fireEngine?.active) {
+            const candidate = { ...person, elapsed: person.elapsed + dt, previousPhase: null };
+            if (['walking-platform', 'walking-car'].includes(person.phase))
+                candidate.progress = clamp(person.progress + person.speed * dt / Math.max(1, walk.length));
+            if (person.phase === 'access-car' && candidate.elapsed >= 6) { candidate.phase = 'walking-car'; candidate.progress = 0; }
+            if (person.phase === 'access-platform' && candidate.elapsed >= 6) candidate.phase = 'waiting-train';
+            if (person.phase === 'walking-car' && !trip.bay) candidate.phase = 'waiting-car';
+            if (person.phase === 'waiting-car' && trip.bay && ['waiting', 'loading'].includes(trip.phase)) {
+                candidate.phase = 'walking-car'; candidate.progress = 0;
+            }
+            if (pedestrianMotionBlocked(town, stationPassengerPose(town, person, 1, 1), stationPassengerPose(town, candidate, 1, 1))) {
+                person.fireEngineWaiting = true;
+                continue;
+            }
+        }
+        person.elapsed += dt;
         if (person.phase === 'walking-platform') {
             person.progress += person.speed * dt / Math.max(1, walk.length);
             if (person.progress >= 1) { person.phase = 'access-platform'; person.elapsed = 0; person.progress = 0; }
@@ -245,6 +263,7 @@ function tryMerge(town, trip) {
             const p = stationPassengerPose(town, person);
             return p.visible && Math.hypot(p.x - trip.bay.x, p.y - trip.bay.y) < radius;
         })) return false;
+        if (stationMovementBlocked(town, trip, 0, TURN_SECONDS, { phase: 'turning-in-bay', outboundPrepared: true })) return false;
         // Preserve the road-centre body position: reversing the off-road car
         // puts its new front one full body length beyond the old rear.
         const q = town.stationVisits.area.outbound.length - town.stationVisits.area.stopDistance + car.length;
@@ -255,6 +274,7 @@ function tryMerge(town, trip) {
     }
     car.roadStop.remaining = HOLD;
     if (!safeRoadInsertion(town, car)) return false;
+    if (stationMovementBlocked(town, trip, 0, TURN_SECONDS, { phase: 'pulling-out' })) return false;
     car.parked = null;
     trip.phase = 'pulling-out'; trip.elapsed = 0;
     sim.parking.claimSpawn(car);
@@ -270,8 +290,11 @@ function maintainTrips(town, dt) {
         }
         arriveEvent(town, trip, time);
         trip.previousElapsed = trip.elapsed; trip.previousPhase = trip.phase;
-        trip.elapsed += dt;
         const car = trip.car;
+        trip.fireEngineWaiting = false;
+        if (car && ['pulling-in', 'turning-in-bay', 'pulling-out'].includes(trip.phase) &&
+            stationMovementBlocked(town, trip, trip.elapsed, trip.elapsed + dt)) trip.fireEngineWaiting = true;
+        else trip.elapsed += dt;
         if (car && !alive.has(car)) {
             trip.car = null; trip.phase = 'finished'; trip.bay = null;
             for (const person of state.passengers.filter(item => item.trip === trip))
@@ -285,6 +308,7 @@ function maintainTrips(town, dt) {
             const bay = state.area.bays.find(item => !occupied.has(item.id));
             car.roadStop.remaining = HOLD;
             if (!bay) continue;
+            if (stationMovementBlocked(town, trip, 0, TURN_SECONDS, { phase: 'pulling-in', bay })) continue;
             trip.bay = bay; trip.passengerBay = bay; trip.phase = 'pulling-in'; trip.elapsed = 0;
         } else if (trip.phase === 'pulling-in' && trip.elapsed >= TURN_SECONDS) {
             car.parked = { station: true, slot: trip.bay.id };
@@ -367,6 +391,28 @@ function normalRoadPose(town, car, widthFactor) {
     return p;
 }
 
+// Station bay motion runs before Simulation.step, so its elapsed-time path
+// needs the same physical player-body veto as ordinary forward road motion.
+function stationMovementBlocked(town, trip, from, to, changes = {}) {
+    const player = town.fireEngine?.pose;
+    if (!town.fireEngine?.active || !player || !trip.car) return false;
+    const widthFactor = town.walking?.widthFactor || 2.5;
+    // Keep increments under 0.03 s, including a complete pi-radian bay turn.
+    // This checks the swept body rather than just the two endpoint positions.
+    const start = clamp(from / TURN_SECONDS) * TURN_SECONDS, finish = clamp(to / TURN_SECONDS) * TURN_SECONDS;
+    const count = Math.max(1, Math.ceil(Math.abs(finish - start) / 0.03));
+    for (let index = 0; index <= count; index++) {
+        const elapsed = start + (finish - start) * index / count;
+        const sample = { ...trip, ...changes, elapsed, previousElapsed: elapsed, previousPhase: changes.phase || trip.phase };
+        const p = stationVehiclePose(town, { ...trip.car, stationVisit: sample }, widthFactor, 1);
+        if (!p) continue;
+        const factor = Math.min(widthFactor * p.road.size, p.road.widthCap || Infinity);
+        if (orientedBodiesOverlap(player, { ...p, length: trip.car.length,
+            width: trip.car.width * factor, layer: p.road.layer }, 0.3)) return true;
+    }
+    return false;
+}
+
 /** Override only bay manoeuvres/parked poses; ordinary approach/departure uses
  * realVehiclePose. Holds road occupancy until its complete body clears. */
 export function stationVehiclePose(town, car, widthFactor = 1, alpha = 1) {
@@ -415,6 +461,7 @@ export function stationPassengerPose(town, person, widthFactor = 1, alpha = 1) {
         const slot = Math.max(0, queue.indexOf(person));
         p = { x: p.x + slot % 2 * 3.2, y: p.y + Math.floor(slot / 2) * 4 - offset };
     }
+    moving &&= !person.fireEngineWaiting;
     return { x: p.x, y: p.y + offset, angle, moving, speed: moving ? person.speed : 0,
         phase: person.phase, colour: person.colour, visible: true, layer: 0, age: person.elapsed };
 }

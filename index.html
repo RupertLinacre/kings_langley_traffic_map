@@ -41,6 +41,11 @@
             </button>
           </div>
 
+          <button id="drive-fire-engine" class="fire-mode-button" type="button" aria-pressed="false">
+            <svg viewBox="0 0 32 24" fill="none" aria-hidden="true"><path d="M3 9h17l3-5h5v14H3V9Z" fill="currentColor" opacity=".18"/><path d="M3 9h17l3-5h5v14H3V9ZM20 9v9M23 5h4v6h-4M5 6h12M7 4v4M12 4v4" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><circle cx="8" cy="19" r="2.5" fill="currentColor"/><circle cx="24" cy="19" r="2.5" fill="currentColor"/><path d="M23 2h3" stroke="#408db6" stroke-width="2" stroke-linecap="round"/></svg>
+            <span>Drive a fire engine<small>Blue lights. Nee naws. Your village.</small></span><span class="fire-mode-arrow" aria-hidden="true">→</span>
+          </button>
+
           <section class="control-section explore-section" aria-labelledby="explore-heading">
             <div class="section-heading"><h2 id="explore-heading">Explore the village</h2><span class="section-number">01</span></div>
             <label class="sr-only" for="place-focus">Go to a landmark</label>
@@ -131,6 +136,27 @@
     </aside>
     <p id="map-hint" class="map-hint" title="Choose a vehicle, boat or walker to follow a little journey."><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="m6 3 9 7-5 1-2 5-2-13Z" /></svg>Tap a vehicle, boat or walker to follow along</p>
     <p id="app-toast" class="app-toast" role="status" hidden></p>
+
+    <section id="fire-engine-hud" class="fire-engine-hud" aria-label="Fire engine driving controls" hidden>
+      <div class="fire-dashboard">
+        <div class="fire-dashboard-title"><span class="blue-beacon" aria-hidden="true"></span><div><strong>Your fire engine</strong><span id="fire-road">High Street</span></div><output id="fire-speed" aria-label="Fire engine speed">0 mph</output></div>
+        <p id="fire-driving-status" class="fire-driving-status">Nee naw! Cars are making room.</p>
+        <p class="fire-key-hint">↑ / W drive · ↓ / S reverse · ← → steer · Space brake</p>
+        <div class="fire-actions">
+          <button id="fire-siren" type="button" aria-pressed="true" title="Toggle siren (N)">Nee naw on</button>
+          <button id="fire-sound" type="button" aria-pressed="true" title="Mute or unmute the sound (M)">Sound on</button>
+          <button id="fire-reset" type="button" title="Return to a clear village street">Start again</button>
+          <button id="fire-leave" type="button" title="Return to watching the village (Escape)">Finish driving</button>
+        </div>
+      </div>
+      <div id="fire-control-pad" class="fire-control-pad" role="group" aria-label="Hold buttons to drive and steer">
+        <button type="button" class="drive-forward" data-drive-control="forward" aria-label="Drive forwards">↑</button>
+        <button type="button" class="drive-left" data-drive-control="left" aria-label="Steer left">←</button>
+        <button type="button" class="drive-brake" data-drive-control="brake" aria-label="Brake">STOP</button>
+        <button type="button" class="drive-right" data-drive-control="right" aria-label="Steer right">→</button>
+        <button type="button" class="drive-reverse" data-drive-control="reverse" aria-label="Reverse">↓</button>
+      </div>
+    </section>
 
     <div class="status-dock" aria-label="Simulation statistics"><div class="metric"><span class="metric-label"><i class="car-swatch"></i>On the road</span><span id="car-count" class="metric-value">— cars</span></div><div class="metric"><span class="metric-label"><i class="bus-swatch"></i>Village buses</span><span id="bus-count" class="metric-value">— buses</span></div><div class="metric"><span class="metric-label">Traffic flow</span><span id="traffic-state" class="metric-value">Starting</span></div><div class="metric queue-metric"><span class="metric-label">At junctions</span><span id="queue-count" class="metric-value">— waiting</span></div></div>
 

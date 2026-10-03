@@ -1,5 +1,7 @@
 import { measure, pathPoint } from './street-geometry.mjs';
 import { rounded, circle, line } from './miniature-art.mjs';
+import { orientedBodiesOverlap } from './body-geometry.mjs';
+import { groupPose } from './purposeful-journeys.mjs';
 
 const COLOURS = ['#c66a52', '#478994', '#d5a23f', '#775e87', '#577553', '#436387'];
 const ALLOWED = new Set(['primary', 'secondary', 'tertiary', 'residential', 'unclassified', 'living_street']);
@@ -71,6 +73,62 @@ function linkPoint(link, progress, width) {
     if (link.type === 'corner') return connector(link, width, t);
     const a = nodePoint(link.from, width), b = nodePoint(link.to, width);
     return { ...a, x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, angle: Math.atan2(b.y - a.y, b.x - a.x) };
+}
+
+/** Test a pedestrian's short swept step against the current player body.
+ * Dimensions match fireEngineObstacles, including the smaller child body;
+ * the engine pose already contains its illustrated width and bridge layer. */
+export function pedestrianMotionBlocked(town, from, to, { length = 2.6, width = 2.1 } = {}) {
+    const engine = town.fireEngine, body = engine?.pose;
+    if (!engine?.active || !body || to?.visible === false || !to ||
+        ![body.x, body.y, body.length, body.width, to.x, to.y].every(Number.isFinite)) return false;
+    const start = from?.visible === false || !from ? to : from;
+    if ((to.layer ?? 0) !== (body.layer ?? 0)) return false;
+    const distance = Math.hypot(to.x - start.x, to.y - start.y);
+    const count = Math.max(1, Math.ceil(distance / 0.4));
+    const turn = Math.atan2(Math.sin((to.angle || 0) - (start.angle || 0)), Math.cos((to.angle || 0) - (start.angle || 0)));
+    for (let i = 0; i <= count; i++) {
+        const t = i / count;
+        if (orientedBodiesOverlap(body, { x: start.x + (to.x - start.x) * t,
+            y: start.y + (to.y - start.y) * t, angle: (start.angle || 0) + turn * t,
+            length, width, layer: to.layer ?? 0 }, 0.25)) return true;
+    }
+    return false;
+}
+
+function walkingBodies(town, person, progress) {
+    const sample = { ...person, progress }, width = town.walking.widthFactor;
+    const group = town.purposefulJourneys?.groups.find(item => item.walker === person);
+    if (!group) return [{ ...pedestrianPose(town, sample, width), length: 2.6, width: 2.1 }];
+    // The family artwork follows a wider pavement route around parked cars.
+    // Use that real visible formation rather than the unshifted controller.
+    const pose = groupPose(town, { ...group, walker: sample }, width, 1);
+    if (!pose.visible) return [];
+    const link = sample.route?.[sample.index];
+    const distance = link?.type === 'walk' ? link.from.distance + (link.to.distance - link.from.distance) * progress : sample.node.distance;
+    const angle = pathPoint(group.walk.section.path, distance).angle, side = group.walk.side;
+    return group.members.map((member, index) => ({ ...pose,
+        x: pose.x + Math.sin(angle) * side * index * 2.15,
+        y: pose.y - Math.cos(angle) * side * index * 2.15,
+        length: member.role === 'child' ? 2 : 2.6, width: member.role === 'child' ? 1.6 : 2.1 }));
+}
+
+function blockedProgress(town, person, link, target) {
+    if (!town.fireEngine?.active) return false;
+    // Sample curved corners as well as long caller timesteps. Each following
+    // short swept segment is checked with the shared oriented-body test.
+    const count = Math.max(1, Math.ceil(Math.abs(target - person.progress) * link.length / 0.4));
+    let previous = walkingBodies(town, person, person.progress);
+    for (let i = 1; i <= count; i++) {
+        const progress = person.progress + (target - person.progress) * i / count;
+        const next = walkingBodies(town, person, progress);
+        if (next.some((body, index) => pedestrianMotionBlocked(town, previous[index] || body, body, body))) {
+            person.fireEngineWaiting = true;
+            return true;
+        }
+        previous = next;
+    }
+    return false;
 }
 function prepareWalking(map, parking) {
     const sections = [], byPhysical = new Map(), armsByNode = new Map(), nodes = [], links = [], crossings = [];
@@ -345,6 +403,8 @@ function advanceGapCrossing(town, person, link, remaining) {
     }
     const target = person.gapStage === 'near' ? geometry.waitProgress : 1;
     const required = Math.max(0, target - person.progress) * geometry.length / person.speed;
+    const nextProgress = Math.min(target, person.progress + remaining * person.speed / geometry.length);
+    if (blockedProgress(town, person, link, nextProgress)) return { remaining: 0, complete: false };
     if (remaining < required) {
         person.progress += remaining * person.speed / geometry.length;
         if (person.gapStage === 'far' && person.progress >= geometry.nearClearProgress) releaseLane(person, near);
@@ -399,6 +459,7 @@ export function updatePedestrians(town, dt) {
     const w = town.walking; w.time += dt;
     const ready = new Map(w.crossings.filter(c => c.kind !== 'gap' && c.users.size).map(c => [c, canEnter(town, c)]));
     for (const person of town.people) {
+        person.fireEngineWaiting = false;
         if (person.pause > 0) { person.pause = Math.max(0, person.pause - dt); continue; }
         let remaining = dt;
         for (let step = 0; step < 24 && remaining > 0; step++) {
@@ -422,6 +483,7 @@ export function updatePedestrians(town, dt) {
                 }
                 const length = link.type === 'crossing' ? pavement(link.from.section.road, w.widthFactor) * 2 : link.length;
                 const required = (1 - person.progress) * length / person.speed;
+                if (blockedProgress(town, person, link, Math.min(1, person.progress + remaining * person.speed / length))) break;
                 if (remaining < required) { person.progress += remaining * person.speed / length; break; }
                 remaining -= required;
             }
@@ -502,6 +564,7 @@ export function releaseLinkedWalker(town, person) {
 export function updateLinkedWalker(town, person, dt) {
     if (!(dt > 0) || person.arrived || !person.route?.length) return;
     town.walking.linked.add(person);
+    person.fireEngineWaiting = false;
     person.previousIndex = person.index; person.previousProgress = person.progress;
     let remaining = dt;
     for (let step = 0; step < 24 && remaining > 0; step++) {
@@ -518,6 +581,7 @@ export function updateLinkedWalker(town, person, dt) {
             }
             const length = link.type === 'crossing' ? pavement(link.from.section.road, town.walking.widthFactor) * 2 : link.length;
             const required = (1 - person.progress) * length / person.speed;
+            if (blockedProgress(town, person, link, Math.min(1, person.progress + remaining * person.speed / length))) break;
             if (remaining < required) { person.progress += remaining * person.speed / length; break; }
             remaining -= required;
         }
@@ -530,7 +594,7 @@ export function updateLinkedWalker(town, person, dt) {
     }
 }
 export function drawPedestrian(g, person, pose, time) {
-    const waiting = ['crossing_wait', 'gap_wait', 'gap_middle_wait'].includes(person.state);
+    const waiting = person.fireEngineWaiting || ['crossing_wait', 'gap_wait', 'gap_middle_wait'].includes(person.state);
     const stride = !waiting && !person.pause ? Math.sin(time * person.speed * 5 + person.id) * 1.5 : 0;
     g.save(); g.translate(pose.x, pose.y); g.rotate(pose.angle); g.scale(0.5, 0.5);
     circle(g, 1, 2, 3.8, '#304b3c25');

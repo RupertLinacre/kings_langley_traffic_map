@@ -200,6 +200,15 @@ export class ParkingActivity {
     if (!legal(s, target.edge) || s.crossingSpawnAllowed?.(car) === false ||
         s.busOvertaking?.spawnAllowed(car) === false || s.adaptive?.spawnAllowed(car) === false ||
         s.parkingManoeuvreAllowed?.(car, target.edge, target.d, car.length / 2 + 10) === false) return false;
+    // A new bay may join parked rows far beyond the target itself. Reserve the
+    // complete future single-file stretch only when the player's hull is clear
+    // of every part of its swept road and pavement corridor.
+    for (const span of spans) {
+      if (s.parkingCorridorAllowed?.(car, span.edge, span.start, span.end) === false) return false;
+      if (!s.parkingCorridorAllowed && s.emergency?.player &&
+          s.emergency.corridorAllowed(span.edge, span.start, span.end,
+            (s.emergency.body(car)?.roadHalfWidth || 3.3) + 3) === false) return false;
+    }
     const occupancy = s.occupancy();
     for (const span of spans) for (const fragment of occupancy.get(`${span.edge.id}:0`) || []) {
       if (fragment.car !== car && overlaps(fragment, { start: span.start - 1, end: span.end + 1 })) return false;

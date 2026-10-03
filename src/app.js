@@ -17,9 +17,13 @@ import { groupPose } from './purposeful-journeys.mjs';
 import { stageParkingVisit } from './village-visits.mjs';
 import { stageTurnDemonstration } from './turn-demonstration.mjs';
 import { turnaroundFits } from './kings-langley/engine/adaptive-traffic.mjs';
+import { startFireEngine, stopFireEngine, updateFireEngine, fireEnginePose } from './fire-engine.mjs';
+import { connectFireEngineControls } from './fire-engine-controls.mjs';
+import { createNeeNawAudio } from './nee-naw-audio.mjs';
 
 const $ = id => document.getElementById(id);
 const canvas = $('road-canvas');
+const mapCanvasLabel = canvas.getAttribute('aria-label');
 const speed = $('simulation-speed'), traffic = $('traffic-level'), width = $('road-size'), zoom = $('town-zoom');
 const cyclists = $('cyclist-count'), people = $('people-count');
 const timeOfDay = $('time-of-day');
@@ -30,6 +34,10 @@ let frame = null, lastTime = 0, accumulator = 0, cacheDirty = true, lastMetrics 
 let collapsed = matchMedia('(max-width: 720px)').matches;
 let currentSeed, selectedVehicleId = null, following = false, lastInspection = -1, toastTimer;
 let selectedOther = null, parkingVisit = 0;
+let fireMode = null, fireFollowing = true, fireMuted = false;
+const fireAudio = createNeeNawAudio();
+const fireControls = connectFireEngineControls({ pad: $('fire-control-pad'),
+    active: () => Boolean(town?.fireEngine?.active && !document.hidden), action: fireAction });
 let acceptedRoadWidth = Number(width.value) / 100;
 const newSeed = () => crypto.getRandomValues(new Uint32Array(1))[0];
 
@@ -47,6 +55,7 @@ function mapArea() {
         if (!collapsed) bottom = Math.min(bottom, panel.offsetTop - 12);
         if (!$('selection-panel').hidden) bottom = Math.min(bottom, $('selection-panel').offsetTop - 12);
     } else if (!collapsed) left = panel.offsetLeft + panel.offsetWidth + 24;
+    if (town?.fireEngine?.active) bottom = Math.min(bottom, innerHeight - $('fire-engine-hud').offsetHeight - 64);
     return { left, top, width: Math.max(120, right - left), height: Math.max(140, bottom - top) };
 }
 
@@ -101,7 +110,11 @@ function calculateTrip() {
 function draw() {
     if (!town) return;
     const alpha = accumulator / 0.1;
-    updateSelection(alpha);
+    if (town.fireEngine?.active) {
+        const p = fireEnginePose(town, paused ? 1 : alpha);
+        if (fireFollowing) camera.anchor([p.x, p.y], ...camera.centre);
+        updateFireDashboard();
+    } else updateSelection(alpha);
     const labelsChanged = cacheDirty || lastMetrics !== town.metricClock;
     const needsCache = renderer.needsCache(camera.view, Number(width.value) / 100, town);
     if (cacheDirty || needsCache) {
@@ -123,6 +136,7 @@ function tick(timestamp) {
         if (lastTime) accumulator += Math.min((timestamp - lastTime) / 1000, 0.1) * Number(speed.value);
         while (accumulator >= 0.1) {
             renderer.captureMotion(town);
+            if (town.fireEngine?.active) updateFireEngine(town, 0.1, fireControls.read(), Number(width.value) / 100);
             updateRealTown(town, 0.1); accumulator -= 0.1;
         }
         lastTime = timestamp;
@@ -139,6 +153,9 @@ function requestDraw(recache = false) {
 function syncAnimation() {
     if (frame !== null) cancelAnimationFrame(frame);
     frame = null; lastTime = 0; accumulator = 0;
+    fireControls.clear();
+    fireAudio.update({ active: Boolean(town?.fireEngine?.active && !paused && !document.hidden),
+        enabled: Boolean(town?.fireEngine?.siren && !fireMuted), time: town?.simulation.time || 0 });
     if (town) renderer.captureMotion(town);
     updateLabels(); requestDraw();
 }
@@ -161,6 +178,7 @@ function setCollapsed(value) {
 }
 
 function setPlanning(value) {
+    if (value && town?.fireEngine?.active) leaveFireEngine();
     if (value) clearSelection();
     planning = value;
     $('planner-panel').hidden = !value;
@@ -186,6 +204,7 @@ function resetTrip() {
 }
 
 function startTraffic(seed = newSeed(), initialMinutes) {
+    if (town?.fireEngine?.active) leaveFireEngine();
     clearSelection();
     currentSeed = seed;
     town = createRealTown(map, demand, seed, { cyclists: Number(cyclists.value), pedestrians: Number(people.value),
@@ -195,6 +214,7 @@ function startTraffic(seed = newSeed(), initialMinutes) {
     setRealTraffic(town, Number(traffic.value) / 100);
     const stationArea = stationArtGeometry(town)?.bounds;
     scenery = createScenery(map, seed, { reservedAreas: stationArea ? [stationArea] : [] });
+    town.scenery = scenery;
     for (let i = 0; i < 30; i++) updateRealTown(town, 0.1);
     lastMetrics = -1; cacheDirty = true;
     resetTrip(); syncAnimation();
@@ -202,6 +222,10 @@ function startTraffic(seed = newSeed(), initialMinutes) {
 
 function focusPlace(id) {
     if (!camera) return;
+    if (town.fireEngine?.active && id === 'village') {
+        fireFollowing = true; requestDraw(); return;
+    }
+    if (town.fireEngine?.active) fireFollowing = false;
     setFollowing(false);
     if (id === 'whole') camera.fit();
     else {
@@ -214,6 +238,7 @@ function focusPlace(id) {
 }
 
 function selectMapPoint(point) {
+    if (town.fireEngine?.active) return;
     if (!planning) {
         const vehicle = renderer.hitTest(point, Math.max(6, 15 / camera.view.scale));
         const distance = p => Math.hypot(p.x - point[0], p.y - point[1]);
@@ -489,6 +514,7 @@ function discover(kind) {
 }
 
 function followBus() {
+    if (town.fireEngine?.active) leaveFireEngine();
     const centre = camera.worldAt(...camera.centre);
     const candidates = town.simulation.cars.filter(car => car.type === 'bus' && car.busService && !car.parked).map(car => {
         const pose = realVehiclePose(town, car, Number(width.value) / 100);
@@ -496,6 +522,66 @@ function followBus() {
     }).sort((a, b) => a.distance - b.distance);
     if (!candidates.length) { notify('No buses in the village just now. The next service will be along soon.'); return; }
     selectVehicle(candidates[0].car, true);
+}
+
+function updateFireDashboard() {
+    const engine = town?.fireEngine;
+    if (!engine?.active) return;
+    $('fire-speed').textContent = `${engine.speed < -0.1 ? 'R · ' : ''}${Math.round(Math.abs(engine.speed) * 2.23694)} mph`;
+    $('fire-road').textContent = engine.road?.tags.name || 'Village lane';
+    const blocked = engine.blocked;
+    $('fire-driving-status').textContent = paused ? 'Paused — take a breather.' : blocked ? String(blocked) :
+        engine.siren ? 'Nee naw! Cars are making room.' : 'Siren off. The village carries on.';
+    $('fire-siren').textContent = engine.siren ? 'Nee naw on' : 'Nee naw off';
+    $('fire-siren').setAttribute('aria-pressed', String(engine.siren));
+    $('fire-sound').textContent = fireAudio.supported ? fireMuted ? 'Sound off' : 'Sound on' : 'Sound unavailable';
+    $('fire-sound').setAttribute('aria-pressed', String(!fireMuted && fireAudio.supported));
+    $('fire-sound').disabled = !fireAudio.supported;
+    $('fire-engine-hud').classList.toggle('siren-off', !engine.siren);
+    fireAudio.update({ active: !paused && !document.hidden, enabled: engine.siren && !fireMuted,
+        time: town.simulation.time });
+}
+
+function enterFireEngine() {
+    if (!town || town.fireEngine?.active) return;
+    const previous = { paused, speed: speed.value, collapsed };
+    if (planning) setPlanning(false);
+    clearSelection();
+    startFireEngine(town, { widthFactor: Number(width.value) / 100 });
+    if (!town.fireEngine?.active) { notify('The village streets are busy. Try again in a moment.'); return; }
+    fireMode = previous; fireFollowing = true;
+    paused = false; speed.value = '1'; speed.disabled = width.disabled = true;
+    $('drive-fire-engine').setAttribute('aria-pressed', 'true');
+    $('fire-engine-hud').hidden = false;
+    document.body.classList.add('driving-fire-engine');
+    canvas.setAttribute('aria-label', 'Drive your fire engine around Kings Langley. Arrow keys or WASD to drive and steer, Space to brake, N for the siren, M to mute, Escape to finish. Stay on roads and pavements.');
+    setCollapsed(true);
+    camera.focus([town.fireEngine.x, town.fireEngine.y], 150);
+    canvas.focus({ preventScroll: true });
+    fireAudio.unlock(); syncAnimation();
+    notify('You’re driving! Arrows or WASD to steer and drive. N for nee naws.');
+}
+
+function leaveFireEngine() {
+    if (!town || (!town.fireEngine?.active && !fireMode)) return;
+    stopFireEngine(town); fireControls.clear(); fireAudio.close();
+    $('fire-engine-hud').hidden = true;
+    $('drive-fire-engine').setAttribute('aria-pressed', 'false');
+    document.body.classList.remove('driving-fire-engine');
+    canvas.setAttribute('aria-label', mapCanvasLabel);
+    speed.disabled = width.disabled = false;
+    if (fireMode) { paused = fireMode.paused; speed.value = fireMode.speed; setCollapsed(fireMode.collapsed); }
+    fireMode = null;
+    syncAnimation();
+}
+
+function fireAction(action) {
+    if (!town?.fireEngine?.active) return;
+    if (action === 'leave') { leaveFireEngine(); canvas.focus(); return; }
+    if (action === 'siren') town.fireEngine.siren = !town.fireEngine.siren;
+    if (action === 'sound') fireMuted = !fireMuted;
+    if (!fireMuted) fireAudio.unlock();
+    updateFireDashboard(); requestDraw();
 }
 
 function applyScenario(key) {
@@ -526,6 +612,19 @@ async function shareView() {
 }
 
 $('toggle-controls').addEventListener('click', () => setCollapsed(!collapsed));
+$('drive-fire-engine').addEventListener('click', enterFireEngine);
+$('fire-leave').addEventListener('click', () => fireAction('leave'));
+$('fire-siren').addEventListener('click', () => fireAction('siren'));
+$('fire-sound').addEventListener('click', () => fireAction('sound'));
+$('fire-reset').addEventListener('click', () => {
+    if (!town?.fireEngine?.active) return;
+    const siren = town.fireEngine.siren;
+    stopFireEngine(town); startFireEngine(town, { widthFactor: Number(width.value) / 100 });
+    if (!town.fireEngine?.active) { leaveFireEngine(); notify('No clear starting space yet.'); return; }
+    town.fireEngine.siren = siren;
+    fireFollowing = true; fireControls.clear();
+    camera.focus([town.fireEngine.x, town.fireEngine.y], 150); syncAnimation(); canvas.focus();
+});
 $('pause-town').addEventListener('click', () => { paused = !paused; syncAnimation(); });
 $('plan-trip').addEventListener('click', () => setPlanning(!planning));
 $('reset-trip').addEventListener('click', resetTrip);
@@ -638,7 +737,7 @@ async function load() {
             $('place-focus').value = ''; requestDraw(true);
         }
         connectMapInput(canvas, camera, {
-            changed: () => { setFollowing(false); $('place-focus').value = ''; requestDraw(true); },
+            changed: () => { setFollowing(false); fireFollowing = false; $('place-focus').value = ''; requestDraw(true); },
             selected: selectMapPoint,
         });
         $('loading-panel').hidden = true;

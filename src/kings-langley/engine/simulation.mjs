@@ -2,6 +2,7 @@ import { Closures } from './closures.mjs';
 import { movementsCompatible } from './junction-movements.mjs';
 import { AdaptiveTraffic } from './adaptive-traffic.mjs';
 import { BusOvertaking } from './bus-overtaking.mjs';
+import { EmergencyTraffic } from './emergency-traffic.mjs';
 import { applyDriver, createDriver, driverAcceleration, resetDriverResponse } from './driver-behaviour.mjs';
 import { isCirculatory, junction20Signal } from './junction20.mjs';
 import {
@@ -127,6 +128,7 @@ export class Simulation {
     this.closures = new Closures(this);
     this.adaptive = new AdaptiveTraffic(this);
     this.busOvertaking = new BusOvertaking(this);
+    this.emergency = new EmergencyTraffic(this);
     this.routes = this.routeSpecs.map((r) => r.path);
     this.totalRate = this.routeSpecs.reduce((sum, r) => sum + r.rate, 0);
     this.popularityClasses = popularityClasses(data, this.routeSpecs);
@@ -344,7 +346,7 @@ export class Simulation {
     const entryClearance = c => {
       if (clearances.has(c)) return clearances.get(c);
       let gap = Math.min(this.leader(c, occupied).gap, this.parking.constraint(c).gap, this.parking.gap?.(c) ?? Infinity,
-        this.closures.gap(c), this.adaptive.gap(c), this.busOvertaking.gap(c));
+        this.closures.gap(c), this.adaptive.gap(c), this.busOvertaking.gap(c), this.emergency.gap(c));
       for (let i = c.index; i < c.route.length && c.offsets[i] - c.q < 180; i++) {
         const edge = this.data.edges[c.route[i]], distance = c.offsets[i + 1] - c.q;
         gap = Math.min(gap, c.offsets[i] + (this.crossingStop?.(c, edge) ?? Infinity) - c.q);
@@ -517,7 +519,7 @@ export class Simulation {
         continue;
       const edge = this.data.edges[c.route[c.index]];
       c.v = Math.min(edge.speed, c.maxSpeed) * 0.65;
-      if (this.crossingSpawnAllowed?.(c) === false || !this.adaptive.spawnAllowed(c) || !this.parking.spawnAllowed(c) || !this.busOvertaking.spawnAllowed(c)) continue;
+      if (this.crossingSpawnAllowed?.(c) === false || !this.emergency.spawnAllowed(c) || !this.adaptive.spawnAllowed(c) || !this.parking.spawnAllowed(c) || !this.busOvertaking.spawnAllowed(c)) continue;
       const spans = [];
       for (
         let j = c.index;
@@ -588,7 +590,7 @@ export class Simulation {
           c = this.createVehicle(spec.path, type, VEHICLES[type].length, lane);
         if (ticket.driver) applyDriver(c, ticket.driver);
         if (c.q >= c.offsets.at(-1)) continue;
-        if (this.crossingSpawnAllowed?.(c) === false || !this.adaptive.spawnAllowed(c) || !this.parking.spawnAllowed(c) || !this.busOvertaking.spawnAllowed(c)) continue;
+        if (this.crossingSpawnAllowed?.(c) === false || !this.emergency.spawnAllowed(c) || !this.adaptive.spawnAllowed(c) || !this.parking.spawnAllowed(c) || !this.busOvertaking.spawnAllowed(c)) continue;
         const leader = this.leader(c, occupied);
         if (leader.gap < 3) continue;
         let intersects = false;
@@ -646,7 +648,7 @@ export class Simulation {
   changeLanes(occupied) {
     for (const c of this.cars) {
       if (
-        c.parked || c.parkingActivity || c.turnaround || c.busPass ||
+        c.parked || c.parkingActivity || c.turnaround || c.busPass || this.emergency.isYielding(c) ||
         c.parkingPassages.some(
           (p) => p.zone.narrow && c.q > p.entry - 30 && c.q < p.exit + 20,
         )
@@ -684,6 +686,7 @@ export class Simulation {
         // passing car back into its old lane, without a real junction claim.
         c.lanes = previousLanes.slice();
         for (let i = c.index; i <= continuation; i++) c.lanes[i] = target;
+        if (!this.emergency.spawnAllowed(c)) { c.lanes = previousLanes; continue; }
         const next = this.leader(c, occupied),
           advantage =
             idmAcceleration(
@@ -706,6 +709,7 @@ export class Simulation {
       throw Error('Use a fixed timestep no greater than 0.2 s');
     if (!(multiplier >= 0 && multiplier <= 4))
       throw Error('Demand multiplier must be 0–4');
+    this.emergency.update(dt);
     this.closures.updateCars();
     this.adaptive.update(dt);
     this.arrivals(dt, multiplier);
@@ -750,11 +754,12 @@ export class Simulation {
           Math.min(
             c.maxSpeed,
             this.busOvertaking.speed(c),
+            this.emergency.speed(c),
             restriction.speed,
             edge.speed * c.desiredFactor,
             isCirculatory(edge.tags) ? 8 : Infinity,
           ) * (this.overrides.get(edge.id) || 1);
-      const diversionGap = Math.min(this.closures.gap(c), this.adaptive.gap(c), this.busOvertaking.gap(c), this.parking.gap?.(c) ?? Infinity);
+      const diversionGap = Math.min(this.closures.gap(c), this.adaptive.gap(c), this.busOvertaking.gap(c), this.parking.gap?.(c) ?? Infinity, this.emergency.gap(c));
       let gap = Math.min(leader.gap, restriction.gap, diversionGap),
         leaderSpeed =
           restriction.gap < leader.gap || diversionGap < leader.gap
@@ -808,7 +813,7 @@ export class Simulation {
       const immediateAcceleration = idmAcceleration(c, desired, gap, leaderSpeed),
         acc = driverAcceleration(c, immediateAcceleration, this.time, stopDistance < 8 || c.turnaround?.preparing),
         result = integrate(c.v, acc, dt);
-      const move = Math.max(0, Math.min(result.move, gap - 0.25, stopDistance));
+      const move = this.emergency.limitMove(c, Math.max(0, Math.min(result.move, gap - 0.25, stopDistance)));
       updates.push({
         c,
         move,
